@@ -1,0 +1,126 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tfire"
+version = "0.1.0"
+description = "Daily wildfire ignition risk prediction for the Trentino province"
+requires-python = ">=3.11"
+authors = [{ name = "Damiano Nicolussi" }]
+
+# Lower bounds rather than exact pins, so the environment stays installable.
+# Freeze the resolved set once the pipeline runs end to end:
+#   .venv/bin/pip freeze > requirements.lock.txt
+#
+# Geospatial packages (geopandas, rasterio) ship binary wheels bundling GDAL and
+# PROJ. If pip ever fails to build them, install from conda-forge rather than
+# hunting system libraries.
+dependencies = [
+    # Core data handling
+    "numpy>=2.1",
+    "pandas>=2.2",
+    "pyarrow>=18.0",          # Parquet read and write
+    # Geospatial
+    "geopandas>=1.1",         # fire cadastre, grid, vector joins
+    "shapely>=2.0",           # polygon geometry, centroid fallback
+    "pyproj>=3.7",            # EPSG:25832 handling
+    # Configuration and CLI
+    "pydantic>=2.10",         # typed config objects
+    "pydantic-settings>=2.7", # environment and file driven settings
+    "pyyaml>=6.0",            # config/config.yaml
+    "typer>=0.15",            # CLI entry points
+    "tqdm>=4.67",             # progress on long downloads
+    # HTTP
+    "requests>=2.32",         # Open-Meteo forecast API
+    "tenacity>=9.0",          # retry logic for CDS and GEE calls
+]
+
+# Staged by milestone so an install stays tractable. `all` pulls everything.
+[project.optional-dependencies]
+sources = [
+    # Raster (M4 topography, land cover)
+    "rasterio>=1.4",          # DEM, CORINE, raster output
+    "rioxarray>=0.18",        # raster to xarray bridge, reprojection
+    "rasterstats>=0.20",      # zonal statistics over grid cells
+    # Gridded climate (M5 meteorology, M9 Mesogeos)
+    "xarray>=2024.10",        # NetCDF and Zarr datacubes
+    "netCDF4>=1.7",           # ERA5-Land NetCDF backend
+    "zarr>=3.0",              # Mesogeos storage format
+    "dask>=2024.10",          # chunked processing of long time series
+    "cdsapi>=0.7.7",          # Copernicus CDS client (ERA5-Land)
+    "xclim>=0.61",            # Canadian FWI and sub-indices, with seasonal spin-up
+    # Remote sensing (M6 vegetation)
+    "earthengine-api>=1.6",   # MODIS and Sentinel-2 access
+    # Human activity (M7)
+    "osmnx>=2.0",             # OpenStreetMap roads, railways, POIs
+    "holidays>=0.60",         # Italian public holidays for is_holiday
+]
+models = [
+    "xgboost>=3.0",           # primary model
+    "scikit-learn>=1.6",      # Random Forest and logistic regression baselines
+    "optuna>=4.0",            # hyperparameter search on AUPRC
+    "shap>=0.48",
+]
+viz = [
+    "matplotlib>=3.9",
+    "seaborn>=0.13",
+]
+app = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+]
+dev = [
+    "pytest>=8.3",
+    "pytest-cov>=6.0",
+    "ruff>=0.9",
+    "mypy>=1.14",
+    "pandas-stubs",
+    "types-PyYAML>=6.0",
+    "types-requests>=2.32",
+]
+all = [
+    "tfire[sources,models,viz,app,dev]",
+]
+
+[project.scripts]
+tfire = "tfire.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM", "ANN"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ANN201"]
+
+[tool.mypy]
+# 3.12 is the floor mypy can type-check under: numpy's bundled stubs use PEP 695
+# `type` statements. The package itself still supports 3.11 (see requires-python).
+python_version = "3.12"
+strict = true
+files = ["src", "tests"]
+
+[[tool.mypy.overrides]]
+module = [
+    "geopandas.*",
+    "shapely.*",
+    "pyogrio.*",
+    "pyproj.*",
+    "cdsapi.*",
+    "ee.*",
+    "rasterio.*",
+    "rioxarray.*",
+    "rasterstats.*",
+    "xclim.*",
+    "osmnx.*",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

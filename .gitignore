@@ -1,0 +1,27 @@
+# Data
+data/
+*.nc
+*.tif
+*.parquet
+
+# Credentials
+.env
+
+# Model artefacts
+models/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Tooling caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Notebooks
+.ipynb_checkpoints/

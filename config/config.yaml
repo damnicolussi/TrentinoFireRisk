@@ -1,0 +1,49 @@
+project:
+  random_seed: 42
+
+crs: "EPSG:25832" # ETRS89 / UTM 32N, native to the PAT data. Never reproject.
+resolution_m: 500
+
+# fires.parquet is not clipped to this range, it's a faithful parse of the whole cadastre.
+date_range:
+  start: "1984-01-01"
+  end: "2024-12-31"
+
+paths:
+  raw: "data/raw"
+  interim: "data/interim"
+  processed: "data/processed"
+  fires_shapefile: "data/raw/pat_fires/Incendi__date.shp"
+  fires_out: "data/interim/fires.parquet"
+  fire_polygons_out: "data/interim/fire_polygons.parquet"
+
+sources:
+  # for cropping external API requests only (CDS wants N/W/S/E, GEE wants
+  # W/S/E/N). the real mask is the PAT boundary in EPSG:25832.
+  bbox_wgs84:
+    north: 46.6
+    west: 10.4
+    south: 45.6
+    east: 12.0
+
+  # Cloud project bound to the Earth Engine account
+  gee_project: "trentino-fire-risk"
+
+fires:
+  expected_row_count: 3187
+  min_valid_timestamps: 3174
+
+  # near_midnight = hour >= 22 or hour < 2 -> 366 records (11.48%)
+  near_midnight_start_hour: 22
+  near_midnight_end_hour: 2
+
+  # suspicious_default_time = 0 <= hour <= 2 -> 200 records (6.28%). The 00:00 to
+  # 02:00 spike is very likely placeholder times entered when the real hour was unknown.
+  suspicious_time_max_hour: 2
+
+  # Number of rows expected to need the DD/MM/YYYY -> scalar field repair
+  # (the 2025 records, where the provider changed the field format).
+  expected_normalized_rows: 13
+
+logging:
+  level: "INFO"
