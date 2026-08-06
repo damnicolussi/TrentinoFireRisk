@@ -7,7 +7,7 @@ data/
 # Credentials
 .env
 
-# Model artefacts
+# Model artifacts
 models/
 
 # Python

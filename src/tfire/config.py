@@ -53,6 +53,27 @@ class PathsConfig(BaseModel):
     fires_shapefile: Path
     fires_out: Path
     fire_polygons_out: Path
+    pat_boundary: Path
+    corine_raw: Path
+    corine_out: Path
+    grid_out: Path
+    grid_spec_out: Path
+
+
+class CorineConfig(BaseModel):
+    model_config = _STRICT
+
+    margin_m: float = Field(gt=0)
+    editions: dict[int, Path]
+
+
+class GridConfig(BaseModel):
+    model_config = _STRICT
+
+    expected_active_cells: int = Field(gt=0)
+    non_burnable_clc_codes: list[int]
+    non_burnable_threshold: float = Field(gt=0, le=1)
+    non_burnable_clc_edition: int
 
 
 class BBoxWGS84(BaseModel):
@@ -115,6 +136,8 @@ class Config(BaseModel):
     date_range: DateRangeConfig
     paths: PathsConfig
     sources: SourcesConfig
+    corine: CorineConfig
+    grid: GridConfig
     fires: FiresConfig
     logging: LoggingConfig
 

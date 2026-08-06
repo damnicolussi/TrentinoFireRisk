@@ -8,8 +8,9 @@ from typing import Annotated
 
 import typer
 
-from tfire.config import load_config, setup_logging
+from tfire.config import Config, load_config, setup_logging
 from tfire.fires import build_positives
+from tfire.grid import build_grid
 from tfire.preflight import CHECKS, check_access
 
 logger = logging.getLogger(__name__)
@@ -43,9 +44,7 @@ def main() -> None:
     """
 
 
-@app.command("build-positives")
-def build_positives_command(config: ConfigOption = None, force: ForceOption = False) -> None:
-    """Parse the PAT fire cadastre into the positive-sample table."""
+def _start(config: Path | None) -> Config:
     cfg = load_config(config)
     setup_logging(cfg)
     logger.info(
@@ -54,7 +53,19 @@ def build_positives_command(config: ConfigOption = None, force: ForceOption = Fa
         cfg.crs,
         cfg.resolution_m,
     )
-    build_positives(cfg, force=force)
+    return cfg
+
+
+@app.command("build-positives")
+def build_positives_command(config: ConfigOption = None, force: ForceOption = False) -> None:
+    """Parse the PAT fire cadastre into the positive-sample table."""
+    build_positives(_start(config), force=force)
+
+
+@app.command("build-grid")
+def build_grid_command(config: ConfigOption = None, force: ForceOption = False) -> None:
+    """Build the 500 m analysis grid with its boundary and non-burnable masks."""
+    build_grid(_start(config), force=force)
 
 
 @app.command("check-access")

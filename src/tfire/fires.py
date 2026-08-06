@@ -15,9 +15,9 @@ from typing import Final
 import geopandas as gpd
 import numpy as np
 import pandas as pd
-from pyproj import CRS
 
 from tfire.config import Config
+from tfire.geo import verify_crs
 
 logger = logging.getLogger(__name__)
 
@@ -180,17 +180,7 @@ def load_fire_polygons(path: Path, expected_crs: str) -> gpd.GeoDataFrame:
     gdf = gpd.read_file(path)
     logger.info("Loaded %d polygons from %s", len(gdf), path)
 
-    if gdf.crs is None:
-        raise ValueError(f"{path} has no CRS; expected {expected_crs}")
-
-    expected = CRS.from_user_input(expected_crs)
-    actual_epsg = gdf.crs.to_epsg(min_confidence=70)
-    if actual_epsg != expected.to_epsg() and gdf.crs != expected:
-        raise ValueError(
-            f"CRS mismatch in {path}: expected {expected_crs}, "
-            f"got {gdf.crs.name!r} (EPSG:{actual_epsg}). Refusing to reproject."
-        )
-    logger.info("CRS verified as %s (%s)", expected_crs, gdf.crs.name)
+    verify_crs(gdf.crs, expected_crs, path)
 
     invalid = int((~gdf.geometry.is_valid).sum())
     if invalid:

@@ -104,7 +104,7 @@ select = ["E", "F", "I", "N", "UP", "B", "SIM", "ANN"]
 # `type` statements. The package itself still supports 3.11 (see requires-python).
 python_version = "3.12"
 strict = true
-files = ["src", "tests"]
+files = ["src", "tests", "scripts"]
 
 [[tool.mypy.overrides]]
 module = [

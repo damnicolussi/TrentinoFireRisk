@@ -16,6 +16,40 @@ paths:
   fires_shapefile: "data/raw/pat_fires/Incendi__date.shp"
   fires_out: "data/interim/fires.parquet"
   fire_polygons_out: "data/interim/fire_polygons.parquet"
+  pat_boundary: "data/raw/pat_boundary/ammprv_v.shp"
+  corine_raw: "data/raw/corine"
+  corine_out: "data/interim/corine"
+  grid_out: "data/interim/grid.parquet"
+  grid_spec_out: "data/interim/grid_spec.json"
+
+corine:
+  # 5 km of slack around the boundary. A 500 m cell straddling the border needs
+  # 100 m pixels from outside it, otherwise its class proportions don't sum to 1.
+  # 5 km is 10 cells, comfortably more than any grid alignment offset.
+  margin_m: 5000
+
+  # source rasters are European-wide, one per edition. filenames encode the
+  # production year, not the reference year, hence the mismatch.
+  editions:
+    1990: "clc-1990/DATA/U2000_CLC1990_V2020_20u1.tif"
+    2000: "clc-2000/DATA/U2006_CLC2000_V2020_20u1.tif"
+    2006: "clc-2006/DATA/U2012_CLC2006_V2020_20u1.tif"
+    2012: "clc-2012/DATA/U2018_CLC2012_V2020_20u1.tif"
+    2018: "clc-2018/DATA/U2018_CLC2018_V2020_20u1.tif"
+
+grid:
+  # a cell is active when its center falls inside the boundary: 24,842 of the
+  # 45,864 bounding-box cells. The province is 6210 km2, so 24,841 cells' worth
+  # of area, which is the cross-check that the mask is placed right.
+  expected_active_cells: 24842
+
+  # the cropped rasters carry CLC grid codes 1-44, not the 3-digit codes.
+  # 1 continuous urban fabric, 31 bare rocks, 34 glaciers and perpetual snow,
+  # 40 water courses, 41 water bodies. 32 (sparsely vegetated areas) is left out:
+  # it covers 829 km2 of the province and sparse vegetation burns.
+  non_burnable_clc_codes: [1, 31, 34, 40, 41]
+  non_burnable_threshold: 0.5
+  non_burnable_clc_edition: 2018
 
 sources:
   # for cropping external API requests only (CDS wants N/W/S/E, GEE wants
