@@ -12,6 +12,7 @@ from tfire.config import Config, load_config, setup_logging
 from tfire.fires import build_positives
 from tfire.grid import build_grid
 from tfire.preflight import CHECKS, check_access
+from tfire.sampling import build_samples
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,12 @@ def build_positives_command(config: ConfigOption = None, force: ForceOption = Fa
 def build_grid_command(config: ConfigOption = None, force: ForceOption = False) -> None:
     """Build the 500 m analysis grid with its boundary and non-burnable masks."""
     build_grid(_start(config), force=force)
+
+
+@app.command("build-samples")
+def build_samples_command(config: ConfigOption = None, force: ForceOption = False) -> None:
+    """Label the positives and draw the negatives around the exclusion set."""
+    build_samples(_start(config), force=force)
 
 
 @app.command("check-access")

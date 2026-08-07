@@ -58,6 +58,8 @@ class PathsConfig(BaseModel):
     corine_out: Path
     grid_out: Path
     grid_spec_out: Path
+    samples_out: Path
+    exclusions_out: Path
 
 
 class CorineConfig(BaseModel):
@@ -121,6 +123,16 @@ class FiresConfig(BaseModel):
     expected_normalized_rows: int
 
 
+class SamplingConfig(BaseModel):
+    model_config = _STRICT
+
+    negative_ratio: int = Field(gt=0)
+    buffer_cells: int = Field(ge=0)
+    buffer_days: int = Field(ge=0)
+    hard_negative_fraction: float = Field(ge=0, le=1)
+    expected_positives: int = Field(gt=0)
+
+
 class LoggingConfig(BaseModel):
     model_config = _STRICT
 
@@ -139,6 +151,7 @@ class Config(BaseModel):
     corine: CorineConfig
     grid: GridConfig
     fires: FiresConfig
+    sampling: SamplingConfig
     logging: LoggingConfig
 
     project_root: Path

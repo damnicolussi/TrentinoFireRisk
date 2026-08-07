@@ -21,6 +21,8 @@ paths:
   corine_out: "data/interim/corine"
   grid_out: "data/interim/grid.parquet"
   grid_spec_out: "data/interim/grid_spec.json"
+  samples_out: "data/interim/samples.parquet"
+  exclusions_out: "data/interim/exclusions.parquet"
 
 corine:
   # 5 km of slack around the boundary. A 500 m cell straddling the border needs
@@ -78,6 +80,22 @@ fires:
   # Number of rows expected to need the DD/MM/YYYY -> scalar field repair
   # (the 2025 records, where the provider changed the field format).
   expected_normalized_rows: 13
+
+sampling:
+  negative_ratio: 10
+
+  # level-3 exclusion around each burned polygon, in cells and in days. 1 cell is
+  # 500 m: 167,505 excluded (cell, date) pairs out of a pool of 340,359,552.
+  buffer_cells: 1
+  buffer_days: 2
+
+  # hard negatives are drawn from high-FWI days without ignition, so they cannot
+  # exist before M5. Any value above 0 raises.
+  hard_negative_fraction: 0.0
+
+  # 3,174 fires inside date_range, minus 5 whose cell center falls outside the
+  # boundary, minus 14 that share a (cell_id, date) with a larger fire.
+  expected_positives: 3155
 
 logging:
   level: "INFO"

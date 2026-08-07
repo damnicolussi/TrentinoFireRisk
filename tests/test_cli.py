@@ -11,7 +11,7 @@ runner = CliRunner()
 
 def test_every_command_is_registered() -> None:
     listed = runner.invoke(app, ["--help"]).output
-    for command in ("build-positives", "build-grid", "check-access"):
+    for command in ("build-positives", "build-grid", "build-samples", "check-access"):
         assert command in listed, f"{command} is missing from the command list"
         assert runner.invoke(app, [command, "--help"]).exit_code == 0
 
