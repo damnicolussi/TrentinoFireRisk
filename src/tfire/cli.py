@@ -9,6 +9,7 @@ from typing import Annotated
 import typer
 
 from tfire.config import Config, load_config, setup_logging
+from tfire.features import EXTRACTORS
 from tfire.fires import build_positives
 from tfire.grid import build_grid
 from tfire.preflight import CHECKS, check_access
@@ -33,6 +34,10 @@ ForceOption = Annotated[
 SourceOption = Annotated[
     list[str] | None,
     typer.Option("--source", help="Source to probe; repeatable. Defaults to all."),
+]
+CategoryOption = Annotated[
+    list[str] | None,
+    typer.Option("--category", help="Feature category to extract; repeatable. Defaults to all."),
 ]
 
 
@@ -73,6 +78,25 @@ def build_grid_command(config: ConfigOption = None, force: ForceOption = False) 
 def build_samples_command(config: ConfigOption = None, force: ForceOption = False) -> None:
     """Label the positives and draw the negatives around the exclusion set."""
     build_samples(_start(config), force=force)
+
+
+@app.command("extract-features")
+def extract_features_command(
+    config: ConfigOption = None, category: CategoryOption = None, force: ForceOption = False
+) -> None:
+    """Extract one or more feature categories onto the grid."""
+    names = sorted(EXTRACTORS) if not category else [c.lower() for c in category]
+    unknown = sorted(set(names) - set(EXTRACTORS))
+    if unknown:
+        raise typer.BadParameter(
+            f"Unknown categor{'y' if len(unknown) == 1 else 'ies'}: {', '.join(unknown)}. "
+            f"Choose from {sorted(EXTRACTORS)}."
+        )
+
+    cfg = _start(config)
+    for name in names:
+        logger.info("Extracting %s", name)
+        EXTRACTORS[name](cfg, force)
 
 
 @app.command("check-access")

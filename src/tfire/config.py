@@ -54,12 +54,17 @@ class PathsConfig(BaseModel):
     fires_out: Path
     fire_polygons_out: Path
     pat_boundary: Path
+    pat_waterbodies: Path
     corine_raw: Path
     corine_out: Path
+    dem_raster: Path
     grid_out: Path
     grid_spec_out: Path
     samples_out: Path
     exclusions_out: Path
+    topography_out: Path
+    geography_out: Path
+    landcover_out: Path
 
 
 class CorineConfig(BaseModel):
@@ -110,6 +115,8 @@ class SourcesConfig(BaseModel):
 
     bbox_wgs84: BBoxWGS84
     gee_project: str
+    dem_collection: str
+    dem_scale_m: int = Field(gt=0)
 
 
 class FiresConfig(BaseModel):
@@ -121,6 +128,28 @@ class FiresConfig(BaseModel):
     near_midnight_end_hour: int = Field(ge=0, le=23)
     suspicious_time_max_hour: int = Field(ge=0, le=23)
     expected_normalized_rows: int
+
+
+class TopographyConfig(BaseModel):
+    model_config = _STRICT
+
+    min_elevation_m: float
+    max_elevation_m: float
+
+    @model_validator(mode="after")
+    def check_ordering(self) -> TopographyConfig:
+        if self.max_elevation_m <= self.min_elevation_m:
+            raise ValueError(
+                f"max_elevation_m ({self.max_elevation_m}) must exceed "
+                f"min_elevation_m ({self.min_elevation_m})"
+            )
+        return self
+
+
+class GeographyConfig(BaseModel):
+    model_config = _STRICT
+
+    waterbody_threshold: float = Field(gt=0, le=1)
 
 
 class SamplingConfig(BaseModel):
@@ -151,6 +180,8 @@ class Config(BaseModel):
     corine: CorineConfig
     grid: GridConfig
     fires: FiresConfig
+    topography: TopographyConfig
+    geography: GeographyConfig
     sampling: SamplingConfig
     logging: LoggingConfig
 

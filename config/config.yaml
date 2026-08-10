@@ -17,12 +17,17 @@ paths:
   fires_out: "data/interim/fires.parquet"
   fire_polygons_out: "data/interim/fire_polygons.parquet"
   pat_boundary: "data/raw/pat_boundary/ammprv_v.shp"
+  pat_waterbodies: "data/raw/pat_hydro/idrspacq.shp"
   corine_raw: "data/raw/corine"
   corine_out: "data/interim/corine"
+  dem_raster: "data/raw/dem/glo30_terrain_500m.tif"
   grid_out: "data/interim/grid.parquet"
   grid_spec_out: "data/interim/grid_spec.json"
   samples_out: "data/interim/samples.parquet"
   exclusions_out: "data/interim/exclusions.parquet"
+  topography_out: "data/interim/topography.parquet"
+  geography_out: "data/interim/geography.parquet"
+  landcover_out: "data/interim/landcover.parquet"
 
 corine:
   # 5 km of slack around the boundary. A 500 m cell straddling the border needs
@@ -65,6 +70,13 @@ sources:
   # Cloud project bound to the Earth Engine account
   gee_project: "trentino-fire-risk"
 
+  # Copernicus DEM GLO-30, release 2024.1
+  dem_collection: "COPERNICUS/DEM/GLO30_2024_1"
+
+  # slope, aspect and roughness are computed at this resolution in the working CRS,
+  # then aggregated to 500 m. GLO-30 is nominally 30 m.
+  dem_scale_m: 30
+
 fires:
   expected_row_count: 3187
   min_valid_timestamps: 3174
@@ -80,6 +92,15 @@ fires:
   # Number of rows expected to need the DD/MM/YYYY -> scalar field repair
   # (the 2025 records, where the provider changed the field format).
   expected_normalized_rows: 13
+
+topography:
+  # bounds for the plausibility check on elevation_mean
+  min_elevation_m: 0
+  max_elevation_m: 4200
+
+geography:
+  # majority rule, same threshold as the non-burnable mask
+  waterbody_threshold: 0.5
 
 sampling:
   negative_ratio: 10
