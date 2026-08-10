@@ -65,6 +65,10 @@ class PathsConfig(BaseModel):
     topography_out: Path
     geography_out: Path
     landcover_out: Path
+    era5_raw: Path
+    era5_weights_out: Path
+    meteo_out: Path
+    fwi_out: Path
 
 
 class CorineConfig(BaseModel):
@@ -152,6 +156,58 @@ class GeographyConfig(BaseModel):
     waterbody_threshold: float = Field(gt=0, le=1)
 
 
+class MeteoConfig(BaseModel):
+    model_config = _STRICT
+
+    dataset: str
+    variables: list[str] = Field(min_length=1)
+    utc_offset_hours: int = Field(ge=-12, le=14)
+    spinup_years: int = Field(ge=0)
+    retry_attempts: int = Field(gt=0)
+    request_timeout_s: int = Field(gt=0)
+    max_in_flight: int = Field(gt=0)
+    poll_interval_s: int = Field(gt=0)
+    precip_windows: list[int] = Field(min_length=1)
+    temp_window_days: int = Field(gt=0)
+    rh_window_days: int = Field(gt=0)
+    min_temp_c: float
+    max_temp_c: float
+    min_pressure_hpa: float = Field(gt=0)
+    max_pressure_hpa: float = Field(gt=0)
+    max_precip_mm: float = Field(gt=0)
+
+    @model_validator(mode="after")
+    def check_ordering(self) -> MeteoConfig:
+        if self.max_temp_c <= self.min_temp_c:
+            raise ValueError(
+                f"max_temp_c ({self.max_temp_c}) must exceed min_temp_c ({self.min_temp_c})"
+            )
+        if self.max_pressure_hpa <= self.min_pressure_hpa:
+            raise ValueError(
+                f"max_pressure_hpa ({self.max_pressure_hpa}) must exceed "
+                f"min_pressure_hpa ({self.min_pressure_hpa})"
+            )
+        if any(window < 1 for window in self.precip_windows):
+            raise ValueError(f"precip_windows must be positive, got {self.precip_windows}")
+        return self
+
+    @property
+    def longest_window_days(self) -> int:
+        """Days of history the lag features need before the first emitted day."""
+        return max(*self.precip_windows, self.temp_window_days, self.rh_window_days)
+
+
+class FWIConfig(BaseModel):
+    model_config = _STRICT
+
+    max_ffmc: float = Field(gt=0)
+    max_dmc: float = Field(gt=0)
+    max_dc: float = Field(gt=0)
+    max_isi: float = Field(gt=0)
+    max_bui: float = Field(gt=0)
+    max_fwi: float = Field(gt=0)
+
+
 class SamplingConfig(BaseModel):
     model_config = _STRICT
 
@@ -182,6 +238,8 @@ class Config(BaseModel):
     fires: FiresConfig
     topography: TopographyConfig
     geography: GeographyConfig
+    meteo: MeteoConfig
+    fwi: FWIConfig
     sampling: SamplingConfig
     logging: LoggingConfig
 

@@ -28,6 +28,10 @@ paths:
   topography_out: "data/interim/topography.parquet"
   geography_out: "data/interim/geography.parquet"
   landcover_out: "data/interim/landcover.parquet"
+  era5_raw: "data/raw/era5land"
+  era5_weights_out: "data/interim/era5_weights.parquet"
+  meteo_out: "data/interim/meteo_daily.parquet"
+  fwi_out: "data/interim/fwi.parquet"
 
 corine:
   # 5 km of slack around the boundary. A 500 m cell straddling the border needs
@@ -101,6 +105,56 @@ topography:
 geography:
   # majority rule, same threshold as the non-burnable mask
   waterbody_threshold: 0.5
+
+meteo:
+  dataset: "reanalysis-era5-land"
+
+  # the hourly product, not the post-processed daily statistics: relative humidity and wind
+  # speed are nonlinear in these fields, so they have to be derived hour by hour and only
+  # then aggregated. Daily means of dewpoint or of u/v cannot recover the right answer.
+  variables:
+    - "2m_temperature"
+    - "2m_dewpoint_temperature"
+    - "surface_pressure"
+    - "total_precipitation"
+    - "10m_u_component_of_wind"
+    - "10m_v_component_of_wind"
+
+  # Trentino runs on UTC+1 standard time. Fire weather is defined on local standard time,
+  # so a day spans 23:00 UTC to 23:00 UTC and noon LST is the 11:00 UTC record.
+  utc_offset_hours: 1
+
+  # years fetched before date_range.start and then dropped. Gives precip_cum30 a full
+  # history at 1984-01-01 and lets DC and DMC settle before the first emitted day.
+  spinup_years: 1
+
+  retry_attempts: 5
+  request_timeout_s: 7200
+
+  # the CDS runs one job at a time per account and dataset.
+  max_in_flight: 2
+  poll_interval_s: 20
+
+  precip_windows: [7, 15, 30]
+  temp_window_days: 3
+  rh_window_days: 7
+
+  # plausibility bounds for the daily aggregates.
+  min_temp_c: -40.0
+  max_temp_c: 45.0
+  min_pressure_hpa: 550.0
+  max_pressure_hpa: 1060.0
+  max_precip_mm: 500.0
+
+fwi:
+  # ceilings for the plausibility check. FFMC is bounded at 101 by construction; the
+  # others are open-ended, so these are what a 41-year alpine record should stay under.
+  max_ffmc: 101.0
+  max_dmc: 1000.0
+  max_dc: 1500.0
+  max_isi: 200.0
+  max_bui: 1000.0
+  max_fwi: 200.0
 
 sampling:
   negative_ratio: 10

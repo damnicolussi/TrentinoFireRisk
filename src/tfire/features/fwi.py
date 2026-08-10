@@ -1,0 +1,151 @@
+"""Canadian Fire Weather Index System indices, computed on the ERA5-Land backbone."""
+
+from __future__ import annotations
+
+import logging
+from typing import Final
+
+import numpy as np
+import numpy.typing as npt
+import pandas as pd
+
+from tfire.config import Config
+from tfire.features.meteo import NOON_COLUMNS
+from tfire.sources.era5land import read_lattice
+
+logger = logging.getLogger(__name__)
+
+# the order xclim returns them in
+_XCLIM_ORDER: Final = ("dc", "dmc", "ffmc", "isi", "bui", "fwi")
+
+INDEX_NAMES: Final = ("fwi", "ffmc", "dmc", "dc", "isi", "bui")
+
+# units of the four noon inputs as `meteo_daily.parquet` stores them; xclim converts from here
+_INPUT_UNITS: Final[dict[str, str]] = {
+    "temp_noon": "degC",
+    "precip_noon24": "mm/day",
+    "wind_speed_noon": "m s-1",
+    "rh_noon": "%",
+}
+
+
+def compute_fwi(meteo: pd.DataFrame, latitudes: npt.NDArray[np.float64]) -> pd.DataFrame:
+    """The six indices from the noon columns of a daily table."""
+    import xarray as xr
+    from xclim.indices import fire
+
+    wide = {
+        name: meteo.pivot(index="date", columns="era5_id", values=name) for name in NOON_COLUMNS
+    }
+    dates = wide["temp_noon"].index.to_numpy()
+    ids = wide["temp_noon"].columns.to_numpy()
+    if latitudes.size != ids.size:
+        raise ValueError(f"{latitudes.size} latitudes for {ids.size} backbone cells")
+
+    def series(name: str) -> xr.DataArray:
+        return xr.DataArray(
+            wide[name].to_numpy().astype(np.float64),
+            dims=("time", "era5_id"),
+            coords={"time": dates, "era5_id": ids},
+            attrs={"units": _INPUT_UNITS[name]},
+        )
+
+    outputs = fire.cffwis_indices(
+        tas=series("temp_noon"),
+        pr=series("precip_noon24"),
+        sfcWind=series("wind_speed_noon"),
+        hurs=series("rh_noon"),
+        lat=xr.DataArray(
+            latitudes, dims=("era5_id",), coords={"era5_id": ids}, attrs={"units": "degrees_north"}
+        ),
+        season_method=None,
+        overwintering=False,
+        initial_start_up=True,
+    )
+
+    frame = pd.DataFrame(
+        {
+            "era5_id": np.tile(ids, len(dates)).astype("int32"),
+            "date": np.repeat(dates, len(ids)).astype("datetime64[us]"),
+        }
+    )
+    for name, output in zip(_XCLIM_ORDER, outputs, strict=True):
+        frame[name] = output.transpose("time", "era5_id").to_numpy().reshape(-1).astype("float32")
+
+    return frame[["era5_id", "date", *INDEX_NAMES]]
+
+
+def validate_fwi(fwi: pd.DataFrame, config: Config) -> None:
+    """Check the acceptance criteria, logging loudly."""
+    ceilings = {
+        "fwi": config.fwi.max_fwi,
+        "ffmc": config.fwi.max_ffmc,
+        "dmc": config.fwi.max_dmc,
+        "dc": config.fwi.max_dc,
+        "isi": config.fwi.max_isi,
+        "bui": config.fwi.max_bui,
+    }
+    for name, ceiling in ceilings.items():
+        values = fwi[name]
+        missing = int(values.isna().sum())
+        if missing:
+            logger.error("%s: %d missing value(s)", name, missing)
+
+        outside = int(((values < 0) | (values > ceiling)).sum())
+        if outside:
+            logger.error(
+                "%s: %d value(s) outside [0, %g], range is [%g, %g]",
+                name,
+                outside,
+                ceiling,
+                values.min(),
+                values.max(),
+            )
+        else:
+            logger.info("%s: [%.1f, %.1f]", name, values.min(), values.max())
+
+    boundary, interior = _year_boundary_jump(fwi)
+    if boundary > interior:
+        logger.error(
+            "DC moves by up to %.1f on 1 January against %.1f the rest of the year, "
+            "which is a seasonal restart",
+            boundary,
+            interior,
+        )
+    else:
+        logger.info(
+            "DC continuity: largest 1 January step %.1f, largest step elsewhere %.1f",
+            boundary,
+            interior,
+        )
+
+
+def _year_boundary_jump(fwi: pd.DataFrame) -> tuple[float, float]:
+    """Largest day-over-day DC move at the year boundary, and away from it."""
+    frame = fwi.sort_values(["era5_id", "date"])
+    delta = frame.groupby("era5_id")["dc"].diff().abs()
+    boundary = frame["date"].dt.dayofyear == 1
+    return float(delta[boundary].max()), float(delta[~boundary].max())
+
+
+def extract_fwi(config: Config, force: bool = False) -> pd.DataFrame:
+    """Build `fwi.parquet` from the daily backbone table."""
+    out = config.path(config.paths.fwi_out)
+    if out.exists() and not force:
+        logger.info("Output already exists, skipping (use --force to rebuild): %s", out)
+        return pd.read_parquet(out)
+
+    source = config.path(config.paths.meteo_out)
+    if not source.is_file():
+        raise FileNotFoundError(
+            f"{source} not found; run `tfire extract-features --category meteo` first"
+        )
+
+    meteo = pd.read_parquet(source, columns=["era5_id", "date", *NOON_COLUMNS])
+    fwi = compute_fwi(meteo, read_lattice(config).cell_latitudes())
+    validate_fwi(fwi, config)
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fwi.to_parquet(out, index=False)
+    logger.info("Wrote %d rows x %d columns to %s", len(fwi), fwi.shape[1], out)
+    return fwi

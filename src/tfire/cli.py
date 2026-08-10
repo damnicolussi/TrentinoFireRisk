@@ -14,6 +14,7 @@ from tfire.fires import build_positives
 from tfire.grid import build_grid
 from tfire.preflight import CHECKS, check_access
 from tfire.sampling import build_samples
+from tfire.sources.era5land import fetch_era5, fetch_years
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,10 @@ SourceOption = Annotated[
 CategoryOption = Annotated[
     list[str] | None,
     typer.Option("--category", help="Feature category to extract; repeatable. Defaults to all."),
+]
+YearOption = Annotated[
+    list[int] | None,
+    typer.Option("--year", help="Year to download; repeatable. Defaults to the whole record."),
 ]
 
 
@@ -85,18 +90,38 @@ def extract_features_command(
     config: ConfigOption = None, category: CategoryOption = None, force: ForceOption = False
 ) -> None:
     """Extract one or more feature categories onto the grid."""
-    names = sorted(EXTRACTORS) if not category else [c.lower() for c in category]
-    unknown = sorted(set(names) - set(EXTRACTORS))
+    selected = set(EXTRACTORS) if not category else {c.lower() for c in category}
+    unknown = sorted(selected - set(EXTRACTORS))
     if unknown:
         raise typer.BadParameter(
             f"Unknown categor{'y' if len(unknown) == 1 else 'ies'}: {', '.join(unknown)}. "
             f"Choose from {sorted(EXTRACTORS)}."
         )
 
+    # registry order, not the order asked for: fwi reads what meteo writes
+    names = [name for name in EXTRACTORS if name in selected]
     cfg = _start(config)
     for name in names:
         logger.info("Extracting %s", name)
         EXTRACTORS[name](cfg, force)
+
+
+@app.command("fetch-era5")
+def fetch_era5_command(
+    config: ConfigOption = None, year: YearOption = None, force: ForceOption = False
+) -> None:
+    """Download the ERA5-Land hourly fields from the CDS into the raw cache."""
+    cfg = _start(config)
+    available = list(fetch_years(cfg))
+    years = available if not year else sorted(set(year))
+
+    outside = [value for value in years if value not in available]
+    if outside:
+        raise typer.BadParameter(
+            f"Year(s) outside the record: {outside}. Choose from {available[0]} to {available[-1]}."
+        )
+
+    fetch_era5(cfg, years, force=force)
 
 
 @app.command("check-access")
