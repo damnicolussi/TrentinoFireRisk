@@ -32,6 +32,10 @@ paths:
   era5_weights_out: "data/interim/era5_weights.parquet"
   meteo_out: "data/interim/meteo_daily.parquet"
   fwi_out: "data/interim/fwi.parquet"
+  landsat_raw: "data/raw/landsat"
+  vegetation_out: "data/interim/vegetation.parquet"
+  vegetation_climatology_out: "data/interim/vegetation_climatology.parquet"
+  vegetation_missingness_out: "data/interim/vegetation_missingness.parquet"
 
 corine:
   # 5 km of slack around the boundary. A 500 m cell straddling the border needs
@@ -155,6 +159,42 @@ fwi:
   max_isi: 200.0
   max_bui: 1000.0
   max_fwi: 200.0
+
+vegetation:
+  # Collection 2 Tier-1 Level-2 surface reflectance. Five sensors are needed to span 1984-2024.
+  collections:
+    - "LANDSAT/LT04/C02/T1_L2"
+    - "LANDSAT/LT05/C02/T1_L2"
+    - "LANDSAT/LE07/C02/T1_L2"
+    - "LANDSAT/LC08/C02/T1_L2"
+    - "LANDSAT/LC09/C02/T1_L2"
+
+  # months per Earth Engine request. Each request composites every scene in the window at
+  # 30 m and reduces to 500 m server side.
+  chunk_months: 3
+
+  # snow gives a nonsense NDVI, so it is masked out of the indices and reported separately
+  # as snow_fraction.
+  mask_snow: true
+
+  # below this share of clear 30 m pixels the cell's composite is an average of too few
+  # observations to trust, and is dropped in favor of the carried-forward value.
+  min_valid_fraction: 0.2
+
+  # how long a value may be carried forward before the cell goes missing instead. Four
+  # months spans an alpine winter without pretending a June observation describes October.
+  max_fill_days: 120
+
+  climatology_min_years: 5
+
+  # what a cell-month with no observation inside max_fill_days gets.
+  no_observation_strategy: "nan"
+
+  # normalized differences are bounded by construction; these catch a scaling error.
+  min_index: -1.0
+  max_index: 1.0
+  min_lst_c: -50.0
+  max_lst_c: 60.0
 
 sampling:
   negative_ratio: 10

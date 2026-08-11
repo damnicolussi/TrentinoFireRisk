@@ -2,17 +2,29 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
+import numpy as np
+import numpy.typing as npt
 import rasterio
 from pyproj import CRS
 from rasterio.windows import Window
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from tfire.grid import GridSpec
+
+logger = logging.getLogger(__name__)
 
 # how close an offset in pixels has to be to a whole number to count as aligned
 _ALIGNMENT_TOLERANCE = 1e-6
+
+
+def grid_transform(spec: GridSpec) -> tuple[float, float, float, float, float, float]:
+    """The grid's own affine transform, in the order Earth Engine and rasterio both take."""
+    return (spec.resolution_m, 0.0, spec.xmin, 0.0, -spec.resolution_m, spec.ymax)
 
 
 def aligned_window(spec: GridSpec, source: rasterio.DatasetReader) -> tuple[Window, int]:
@@ -58,3 +70,31 @@ def aligned_window(spec: GridSpec, source: rasterio.DatasetReader) -> tuple[Wind
         )
 
     return window, factor
+
+
+def read_cell_bands(
+    spec: GridSpec, path: Path, expected: tuple[str, ...] | None = None
+) -> dict[str, npt.NDArray[np.float64]]:
+    """Read a raster already on the grid's own lattice as one flat array per band.
+
+    Arrays come back in `cell_id` order. `expected` asserts the band descriptions, so a stale
+    cache written by an earlier version of the producer is caught rather than silently misread.
+    """
+    with rasterio.open(path) as source:
+        _, factor = aligned_window(spec, source)
+        if factor != 1:
+            raise ValueError(
+                f"{path} is at {source.res[0]} m, expected the {spec.resolution_m} m grid"
+            )
+        names = tuple(source.descriptions)
+        if expected is not None and names != expected:
+            raise ValueError(
+                f"{path} carries bands {names}, expected {expected}. "
+                "Delete it and rerun to fetch it again."
+            )
+        if any(name is None for name in names):
+            raise ValueError(f"{path} has unnamed bands; it cannot be read by name")
+        data = source.read().astype(np.float64)
+
+    logger.info("Read %d band(s) of %d cell(s) from %s", data.shape[0], spec.n_cells, path.name)
+    return dict(zip(names, data.reshape(len(names), spec.n_cells), strict=True))

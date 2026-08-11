@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -69,6 +69,10 @@ class PathsConfig(BaseModel):
     era5_weights_out: Path
     meteo_out: Path
     fwi_out: Path
+    landsat_raw: Path
+    vegetation_out: Path
+    vegetation_climatology_out: Path
+    vegetation_missingness_out: Path
 
 
 class CorineConfig(BaseModel):
@@ -208,6 +212,36 @@ class FWIConfig(BaseModel):
     max_fwi: float = Field(gt=0)
 
 
+class VegetationConfig(BaseModel):
+    model_config = _STRICT
+
+    collections: list[str] = Field(min_length=1)
+    chunk_months: int = Field(gt=0, le=12)
+    mask_snow: bool
+    min_valid_fraction: float = Field(ge=0, le=1)
+    max_fill_days: int = Field(gt=0)
+    climatology_min_years: int = Field(gt=0)
+    no_observation_strategy: Literal["nan", "climatology"]
+    min_index: float
+    max_index: float
+    min_lst_c: float
+    max_lst_c: float
+
+    @model_validator(mode="after")
+    def check_ordering(self) -> VegetationConfig:
+        if self.max_index <= self.min_index:
+            raise ValueError(
+                f"max_index ({self.max_index}) must exceed min_index ({self.min_index})"
+            )
+        if self.max_lst_c <= self.min_lst_c:
+            raise ValueError(
+                f"max_lst_c ({self.max_lst_c}) must exceed min_lst_c ({self.min_lst_c})"
+            )
+        if 12 % self.chunk_months:
+            raise ValueError(f"chunk_months must divide 12, got {self.chunk_months}")
+        return self
+
+
 class SamplingConfig(BaseModel):
     model_config = _STRICT
 
@@ -240,6 +274,7 @@ class Config(BaseModel):
     geography: GeographyConfig
     meteo: MeteoConfig
     fwi: FWIConfig
+    vegetation: VegetationConfig
     sampling: SamplingConfig
     logging: LoggingConfig
 

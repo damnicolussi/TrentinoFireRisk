@@ -154,7 +154,35 @@ def check_gee(config: Config) -> AccessCheck:
     )
 
 
-CHECKS: dict[str, Callable[[Config], AccessCheck]] = {"cds": check_cds, "gee": check_gee}
+def check_landsat(config: Config) -> AccessCheck:
+    """Count the scenes each configured Landsat collection holds over the province."""
+    import ee
+
+    try:
+        ee.Initialize(project=config.sources.gee_project)
+        region = ee.Geometry.Rectangle(config.sources.bbox_wgs84.as_bounds())
+        counts = {
+            collection.split("/")[1]: int(
+                ee.ImageCollection(collection).filterBounds(region).size().getInfo()
+            )
+            for collection in config.vegetation.collections
+        }
+    except Exception as error:  # noqa: BLE001  any failure here is a failed check
+        return AccessCheck("Landsat", ok=False, detail=f"{type(error).__name__}: {error}")
+
+    empty = sorted(name for name, count in counts.items() if not count)
+    if empty:
+        return AccessCheck("Landsat", ok=False, detail=f"no scenes over Trentino for {empty}")
+
+    scenes = ", ".join(f"{name} {count}" for name, count in counts.items())
+    return AccessCheck("Landsat", ok=True, detail=f"{sum(counts.values())} scene(s): {scenes}")
+
+
+CHECKS: dict[str, Callable[[Config], AccessCheck]] = {
+    "cds": check_cds,
+    "gee": check_gee,
+    "landsat": check_landsat,
+}
 
 
 def check_access(config: Config, sources: Iterable[str]) -> list[AccessCheck]:

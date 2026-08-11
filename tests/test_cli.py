@@ -18,6 +18,7 @@ def test_every_command_is_registered() -> None:
         "build-samples",
         "extract-features",
         "fetch-era5",
+        "fetch-landsat",
         "check-access",
     ):
         assert command in listed, f"{command} is missing from the command list"
@@ -30,6 +31,7 @@ def test_every_command_is_registered() -> None:
         ("check-access", "--source", "nope"),
         ("extract-features", "--category", "nope"),
         ("fetch-era5", "--year", "1899"),
+        ("fetch-landsat", "--year", "1899"),
     ],
 )
 def test_an_unknown_name_is_rejected_before_any_work_starts(

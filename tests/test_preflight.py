@@ -39,8 +39,8 @@ def test_malformed_bbox_is_rejected(kwargs: dict[str, float]) -> None:
         BBoxWGS84(**kwargs)
 
 
-def test_both_sources_are_registered() -> None:
-    assert set(CHECKS) == {"cds", "gee"}
+def test_every_source_is_registered() -> None:
+    assert set(CHECKS) == {"cds", "gee", "landsat"}
 
 
 def test_failed_check_is_reported_not_raised(

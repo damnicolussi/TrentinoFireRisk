@@ -15,6 +15,7 @@ from tfire.grid import build_grid
 from tfire.preflight import CHECKS, check_access
 from tfire.sampling import build_samples
 from tfire.sources.era5land import fetch_era5, fetch_years
+from tfire.sources.landsat import fetch_landsat
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +123,24 @@ def fetch_era5_command(
         )
 
     fetch_era5(cfg, years, force=force)
+
+
+@app.command("fetch-landsat")
+def fetch_landsat_command(
+    config: ConfigOption = None, year: YearOption = None, force: ForceOption = False
+) -> None:
+    """Download the monthly Landsat composites from Earth Engine into the raw cache."""
+    cfg = _start(config)
+    available = list(range(cfg.date_range.start.year, cfg.date_range.end.year + 1))
+    years = available if not year else sorted(set(year))
+
+    outside = [value for value in years if value not in available]
+    if outside:
+        raise typer.BadParameter(
+            f"Year(s) outside the record: {outside}. Choose from {available[0]} to {available[-1]}."
+        )
+
+    fetch_landsat(cfg, years, force=force)
 
 
 @app.command("check-access")

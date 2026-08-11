@@ -10,7 +10,8 @@ import pandas as pd
 
 from tfire.config import Config
 from tfire.grid import load_grid
-from tfire.sources.dem import ASPECT_BANDS, BAND_NAMES, fetch_terrain, read_cell_bands
+from tfire.raster import read_cell_bands
+from tfire.sources.dem import ASPECT_BANDS, BAND_NAMES, fetch_terrain
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +21,7 @@ _MAX_SLOPE_DEGREES: Final = 90.0
 
 def build_topography_frame(config: Config) -> pd.DataFrame:
     spec, grid = load_grid(config)
-    bands = read_cell_bands(spec, fetch_terrain(spec, config))
+    bands = read_cell_bands(spec, fetch_terrain(spec, config), BAND_NAMES)
 
     active = grid.loc[grid["is_trentino"], "cell_id"].to_numpy()
     frame = pd.DataFrame({name: bands[name] for name in BAND_NAMES}).astype("float32")

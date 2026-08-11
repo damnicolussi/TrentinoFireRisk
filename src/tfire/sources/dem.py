@@ -12,13 +12,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 import numpy as np
-import numpy.typing as npt
 import rasterio
 import requests
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from tfire.config import Config
-from tfire.raster import aligned_window
+from tfire.raster import grid_transform
 
 if TYPE_CHECKING:
     import ee
@@ -107,13 +106,9 @@ def terrain_image(spec: GridSpec, config: Config) -> ee.Image:
     image: ee.Image = (
         aggregated.select(list(_EE_BAND_ORDER))
         .rename(list(BAND_NAMES))
-        .reproject(crs=spec.crs, crsTransform=list(_grid_transform(spec)))
+        .reproject(crs=spec.crs, crsTransform=list(grid_transform(spec)))
     )
     return image
-
-
-def _grid_transform(spec: GridSpec) -> tuple[float, float, float, float, float, float]:
-    return (spec.resolution_m, 0.0, spec.xmin, 0.0, -spec.resolution_m, spec.ymax)
 
 
 @retry(
@@ -134,7 +129,7 @@ def _download(image: ee.Image, spec: GridSpec) -> bytes:
         {
             "region": region,
             "crs": spec.crs,
-            "crs_transform": list(_grid_transform(spec)),
+            "crs_transform": list(grid_transform(spec)),
             "format": "GEO_TIFF",
         }
     )
@@ -200,22 +195,3 @@ def fetch_terrain(spec: GridSpec, config: Config) -> Path:
     _write_cache(payload, spec, path)
     logger.info("Wrote %d bands to %s (%.1f MB)", len(BAND_NAMES), path, path.stat().st_size / 1e6)
     return path
-
-
-def read_cell_bands(spec: GridSpec, path: Path) -> dict[str, npt.NDArray[np.float64]]:
-    """Read the cached terrain raster as one flat array per band, in `cell_id` order."""
-    with rasterio.open(path) as source:
-        window, factor = aligned_window(spec, source)
-        if factor != 1:
-            raise ValueError(
-                f"{path} is at {source.res[0]} m, expected the {spec.resolution_m} m grid"
-            )
-        if tuple(source.descriptions) != BAND_NAMES:
-            raise ValueError(
-                f"{path} carries bands {source.descriptions}, expected {BAND_NAMES}. "
-                "Delete it and rerun to fetch it again."
-            )
-        data = source.read(window=window).astype(np.float64)
-
-    logger.info("Read %d band(s) of %d cell(s) from %s", data.shape[0], spec.n_cells, path.name)
-    return dict(zip(BAND_NAMES, data.reshape(len(BAND_NAMES), spec.n_cells), strict=True))
