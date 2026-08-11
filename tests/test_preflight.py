@@ -13,10 +13,9 @@ from tfire.config import BBoxWGS84, Config
 from tfire.preflight import CHECKS, AccessCheck, check_access
 
 
-def test_bbox_orderings_differ_by_convention() -> None:
-    """CDS wants N/W/S/E, GEE wants xmin/ymin/xmax/ymax; swapping them is the bug to catch."""
+def test_bbox_bounds_use_the_earth_engine_ordering() -> None:
+    """Earth Engine wants xmin/ymin/xmax/ymax; feeding it N/W/S/E is the bug to catch."""
     bbox = BBoxWGS84(north=46.6, west=10.4, south=45.6, east=12.0)
-    assert bbox.as_cds_area() == [46.6, 10.4, 45.6, 12.0]
     assert bbox.as_bounds() == [10.4, 45.6, 12.0, 46.6]
 
 
@@ -40,7 +39,7 @@ def test_malformed_bbox_is_rejected(kwargs: dict[str, float]) -> None:
 
 
 def test_every_source_is_registered() -> None:
-    assert set(CHECKS) == {"cds", "gee", "landsat"}
+    assert set(CHECKS) == {"era5", "gee", "landsat"}
 
 
 def test_failed_check_is_reported_not_raised(
@@ -49,10 +48,10 @@ def test_failed_check_is_reported_not_raised(
     """A failing probe must return a result so every source still gets tried."""
 
     def boom(_: Config) -> AccessCheck:
-        return AccessCheck("CDS", ok=False, detail="RuntimeError: no credentials")
+        return AccessCheck("ERA5", ok=False, detail="RuntimeError: no credentials")
 
-    monkeypatch.setitem(CHECKS, "cds", boom)
-    (result,) = check_access(config, ["cds"])
+    monkeypatch.setitem(CHECKS, "era5", boom)
+    (result,) = check_access(config, ["era5"])
 
     assert not result.ok
     assert "no credentials" in result.detail

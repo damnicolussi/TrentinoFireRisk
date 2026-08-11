@@ -111,7 +111,7 @@ def extract_features_command(
 def fetch_era5_command(
     config: ConfigOption = None, year: YearOption = None, force: ForceOption = False
 ) -> None:
-    """Download the ERA5-Land hourly fields from the CDS into the raw cache."""
+    """Download the ERA5-Land hourly fields from Earth Engine into the raw cache."""
     cfg = _start(config)
     available = list(fetch_years(cfg))
     years = available if not year else sorted(set(year))

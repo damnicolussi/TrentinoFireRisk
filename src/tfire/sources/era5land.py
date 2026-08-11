@@ -1,24 +1,35 @@
-"""ERA5-Land hourly fields from the Copernicus CDS, cached per variable and half-year."""
+"""ERA5-Land hourly fields from Earth Engine, cached per variable and half-year."""
 
 from __future__ import annotations
 
+import io
 import logging
+import math
 import time
+from calendar import monthrange
+from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 import numpy as np
 import numpy.typing as npt
+import rasterio
+import requests
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from tfire.config import Config
+from tfire.sources.landsat import is_oversized
 
 if TYPE_CHECKING:
     import xarray as xr
 
 logger = logging.getLogger(__name__)
 
-# what each requested variable is called inside the returned NetCDF
+# what each variable is called inside the cached NetCDF
 SHORT_NAMES: Final[dict[str, str]] = {
     "2m_temperature": "t2m",
     "2m_dewpoint_temperature": "d2m",
@@ -30,21 +41,32 @@ SHORT_NAMES: Final[dict[str, str]] = {
 
 RESOLUTION_DEG: Final = 0.1
 
-# CDS rejects a request above roughly 6,000 fields. One variable over half a year is
-# 4,464, and keeping a single variable per request avoids the archive the CDS returns
-# when accumulated and instantaneous fields share one.
+GEE_COLLECTION: Final = "ECMWF/ERA5_LAND/HOURLY"
+
+# Earth Engine's spelling of the same six fields
+GEE_BANDS: Final[dict[str, str]] = {
+    "2m_temperature": "temperature_2m",
+    "2m_dewpoint_temperature": "dewpoint_temperature_2m",
+    "surface_pressure": "surface_pressure",
+    "total_precipitation": "total_precipitation",
+    "10m_u_component_of_wind": "u_component_of_wind_10m",
+    "10m_v_component_of_wind": "v_component_of_wind_10m",
+}
+
+# `getDownloadURL` refuses more bands than this, and one window carries hours x variables
+MAX_GEE_BANDS: Final = 1024
+
+# ERA5-Land covers Trentino with no masked cell, and Earth Engine writes a masked pixel as 0,
+# which would read as a real value. A sentinel no field can reach turns that into a loud failure.
+_MASK_FILL: Final = -32768.0
+
+_GEE_TIMEOUT_S: Final = 1800
+_GEE_RETRY_ATTEMPTS: Final = 4
+
+# a bounding box edge sitting on a grid line lands just under it in binary
+_GRID_EPS: Final = 1e-6
+
 HALVES: Final = (1, 2)
-
-# failures carrying one of these are about the request, not about load
-_PERMANENT_MARKERS: Final = ("too large", "cost limit", "licence", "license", "not found")
-
-# the queue is full right now, so the same request will succeed later
-_THROTTLE_MARKERS: Final = ("temporarily limited", "has been rejected", "too many", "rate limit")
-
-_MAX_COOLDOWN_S: Final = 600
-
-# dimensions the CDS adds for the near-real-time overlap and for ensemble products
-_SURPLUS_DIMS: Final = ("number", "expver")
 
 
 @dataclass(frozen=True, eq=False)
@@ -107,92 +129,215 @@ def cache_path(config: Config, variable: str, year: int, half: int) -> Path:
     return config.path(config.paths.era5_raw) / variable / f"{year}-h{half}.nc"
 
 
-def _request(config: Config, variable: str, year: int, half: int) -> dict[str, object]:
-    return {
-        "variable": [variable],
-        "year": [str(year)],
-        "month": [f"{month:02d}" for month in half_months(half)],
-        "day": [f"{day:02d}" for day in range(1, 32)],
-        "time": [f"{hour:02d}:00" for hour in range(24)],
-        "area": config.sources.bbox_wgs84.as_cds_area(),
-        "data_format": "netcdf",
-        "download_format": "unarchived",
-    }
+def bbox_lattice(config: Config) -> Lattice:
+    """The 0.1 degree ERA5-Land points inside the request box, without reading a download."""
+    box = config.sources.bbox_wgs84
+    north = math.floor(box.north / RESOLUTION_DEG + _GRID_EPS)
+    south = math.ceil(box.south / RESOLUTION_DEG - _GRID_EPS)
+    west = math.ceil(box.west / RESOLUTION_DEG - _GRID_EPS)
+    east = math.floor(box.east / RESOLUTION_DEG + _GRID_EPS)
+    if north < south or east < west:
+        raise ValueError(f"No ERA5-Land grid point inside {box}")
+
+    latitudes = np.round(np.arange(north, south - 1, -1) * RESOLUTION_DEG, 6)
+    longitudes = np.round(np.arange(west, east + 1) * RESOLUTION_DEG, 6)
+    return Lattice(latitudes, longitudes)
 
 
-def _reason(error: BaseException) -> str:
-    """The error text together with whatever the API put in the response body."""
-    response = getattr(error, "response", None)
-    body = getattr(response, "text", "") if response is not None else ""
-    return f"{error} {body}".lower()
+def half_bounds(year: int, half: int) -> tuple[datetime, datetime]:
+    """The half-open UTC interval one half-year covers."""
+    months = half_months(half)
+    start = datetime(year, months[0], 1, tzinfo=UTC)
+    end = datetime(year + 1, 1, 1, tzinfo=UTC) if half == 2 else datetime(year, 7, 1, tzinfo=UTC)
+    return start, end
 
 
-def is_permanent(error: BaseException) -> bool:
-    """Whether resubmitting the same request would fail the same way."""
-    reason = _reason(error)
-    return any(marker in reason for marker in _PERMANENT_MARKERS)
+def half_hours(year: int, half: int) -> int:
+    return 24 * sum(monthrange(year, month)[1] for month in half_months(half))
 
 
-def is_throttle(error: BaseException) -> bool:
-    """Whether the CDS turned the request away for load rather than for content."""
-    reason = _reason(error)
-    return not is_permanent(error) and any(marker in reason for marker in _THROTTLE_MARKERS)
+def windows(config: Config, year: int, half: int) -> list[tuple[datetime, datetime]]:
+    """Half-open intervals tiling one half-year, each within the band cap."""
+    span = config.meteo.gee_window_hours
+    bands = span * len(config.meteo.variables)
+    if bands > MAX_GEE_BANDS:
+        raise ValueError(
+            f"{span} hours x {len(config.meteo.variables)} variables is {bands} bands, "
+            f"over Earth Engine's limit of {MAX_GEE_BANDS}; lower meteo.gee_window_hours"
+        )
+
+    start, end = half_bounds(year, half)
+    step = timedelta(hours=span)
+    spans = []
+    cursor = start
+    while cursor < end:
+        spans.append((cursor, min(cursor + step, end)))
+        cursor += step
+    return spans
 
 
-@dataclass
-class _Chunk:
-    variable: str
-    year: int
-    half: int
-    target: Path
-    attempts: int = 0
+@retry(
+    stop=stop_after_attempt(_GEE_RETRY_ATTEMPTS),
+    wait=wait_exponential(multiplier=5, max=120),
+    retry=retry_if_exception(lambda error: not is_oversized(error)),
+    reraise=True,
+)
+def _download_window(
+    config: Config, lattice: Lattice, start: datetime, end: datetime
+) -> tuple[list[str], bytes]:
+    import ee
 
-    def __str__(self) -> str:
-        return f"{self.variable} {self.year} h{self.half}"
+    bands = [GEE_BANDS[name] for name in config.meteo.variables]
+    collection = (
+        ee.ImageCollection(GEE_COLLECTION)
+        .filterDate(start.strftime("%Y-%m-%dT%H:%M:%S"), end.strftime("%Y-%m-%dT%H:%M:%S"))
+        .select(bands)
+    )
+    stamps: list[str] = collection.aggregate_array("system:index").getInfo()
+
+    west = float(lattice.longitudes[0]) - RESOLUTION_DEG / 2
+    north = float(lattice.latitudes[0]) + RESOLUTION_DEG / 2
+    east = float(lattice.longitudes[-1]) + RESOLUTION_DEG / 2
+    south = float(lattice.latitudes[-1]) - RESOLUTION_DEG / 2
+    region = ee.Geometry.Rectangle(
+        [west, south, east, north], proj=ee.Projection("EPSG:4326"), geodesic=False
+    )
+    url = (
+        collection.toBands()
+        .unmask(_MASK_FILL)
+        .getDownloadURL(
+            {
+                "region": region,
+                "crs": "EPSG:4326",
+                "crs_transform": [RESOLUTION_DEG, 0, west, 0, -RESOLUTION_DEG, north],
+                "format": "GEO_TIFF",
+            }
+        )
+    )
+    response = requests.get(url, timeout=_GEE_TIMEOUT_S)
+    response.raise_for_status()
+    return stamps, response.content
 
 
-def _pending(config: Config, years: list[int], force: bool) -> list[_Chunk]:
-    chunks = []
-    for year in years:
-        for variable in config.meteo.variables:
-            for half in HALVES:
-                target = cache_path(config, variable, year, half)
-                if target.is_file() and not force:
-                    continue
-                chunks.append(_Chunk(variable, year, half, target))
-    return chunks
+def crop_indices(
+    transform: rasterio.Affine, width: int, height: int, lattice: Lattice
+) -> tuple[npt.NDArray[np.intp], npt.NDArray[np.intp]]:
+    """Rows and columns of the lattice points inside a raster Earth Engine may have grown.
+
+    The returned extent is snapped outward to whole tiles, so it is generally larger than the
+    box asked for and its origin is not the one asked for either.
+    """
+    longitudes = transform.c + transform.a * (np.arange(width) + 0.5)
+    latitudes = transform.f + transform.e * (np.arange(height) + 0.5)
+
+    rows = np.abs(latitudes[None, :] - lattice.latitudes[:, None]).argmin(axis=1)
+    columns = np.abs(longitudes[None, :] - lattice.longitudes[:, None]).argmin(axis=1)
+    if not np.allclose(latitudes[rows], lattice.latitudes, atol=_GRID_EPS):
+        raise ValueError(f"Raster latitudes {latitudes} do not carry {lattice.latitudes}")
+    if not np.allclose(longitudes[columns], lattice.longitudes, atol=_GRID_EPS):
+        raise ValueError(f"Raster longitudes {longitudes} do not carry {lattice.longitudes}")
+    return rows, columns
 
 
-def _collect(remote: object, target: Path) -> None:
-    """Download a finished job through a partial file."""
-    partial = target.with_suffix(".nc.partial")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    remote.download(str(partial))  # type: ignore[attr-defined]
-    partial.replace(target)
+@contextmanager
+def _quiet_gdal() -> Iterator[None]:
+    """Earth Engine's band stack carries no photometric tag, and GDAL warns about it per file."""
+    gdal = logging.getLogger("rasterio._env")
+    level = gdal.level
+    gdal.setLevel(logging.ERROR)
+    try:
+        yield
+    finally:
+        gdal.setLevel(level)
 
 
-def _defer(chunk: _Chunk, error: BaseException, config: Config, queue: list[_Chunk]) -> bool:
-    """Requeue a chunk, and report whether the CDS was the one saying no."""
-    if is_throttle(error):
-        queue.append(chunk)
-        return True
+def read_window(
+    payload: bytes, lattice: Lattice, n_hours: int, n_variables: int
+) -> npt.NDArray[np.float32]:
+    """One window's GeoTIFF as `(hour, variable, latitude, longitude)` on the lattice.
 
-    chunk.attempts += 1
-    if is_permanent(error) or chunk.attempts >= config.meteo.retry_attempts:
-        raise error
+    `toBands` emits one band per image per selected band, images outermost, so the band
+    holding variable `v` at hour `h` sits at `h * n_variables + v`.
+    """
+    with _quiet_gdal(), rasterio.open(io.BytesIO(payload)) as source:
+        expected = n_hours * n_variables
+        if source.count != expected:
+            raise ValueError(
+                f"Earth Engine returned {source.count} bands, expected "
+                f"{n_hours} hours x {n_variables} variables = {expected}"
+            )
+        rows, columns = crop_indices(source.transform, source.width, source.height, lattice)
+        stack = source.read().astype("float32")
 
-    logger.warning("%s failed (attempt %d), requeued: %s", chunk, chunk.attempts, error)
-    queue.append(chunk)
-    return False
+    cropped: npt.NDArray[np.float32] = stack[:, rows[:, None], columns[None, :]]
+    if np.any(cropped == _MASK_FILL):
+        raise ValueError("Earth Engine masked an ERA5-Land cell over Trentino")
+    return cropped.reshape(n_hours, n_variables, lattice.n_rows, lattice.n_cols)
+
+
+def _write_half(
+    config: Config,
+    lattice: Lattice,
+    times: npt.NDArray[np.datetime64],
+    values: npt.NDArray[np.float32],
+    year: int,
+    half: int,
+) -> list[Path]:
+    import xarray as xr
+
+    written = []
+    for index, variable in enumerate(config.meteo.variables):
+        short = SHORT_NAMES[variable]
+        dataset = xr.Dataset(
+            {short: (("valid_time", "latitude", "longitude"), values[:, index])},
+            coords={
+                "valid_time": times,
+                "latitude": lattice.latitudes,
+                "longitude": lattice.longitudes,
+            },
+        )
+        target = cache_path(config, variable, year, half)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        partial = target.with_suffix(".nc.partial")
+        dataset.to_netcdf(partial, encoding={short: {"zlib": True, "complevel": 4}})
+        partial.replace(target)
+        written.append(target)
+    return written
+
+
+def _fetch_half(config: Config, lattice: Lattice, year: int, half: int) -> list[Path]:
+    spans = windows(config, year, half)
+    with ThreadPoolExecutor(max_workers=config.meteo.gee_workers) as pool:
+        results = list(pool.map(lambda span: _download_window(config, lattice, *span), spans))
+
+    stamps: list[str] = []
+    blocks = []
+    for window_stamps, payload in results:
+        stamps.extend(window_stamps)
+        blocks.append(
+            read_window(payload, lattice, len(window_stamps), len(config.meteo.variables))
+        )
+
+    expected = half_hours(year, half)
+    if len(stamps) != expected:
+        raise ValueError(f"{year} h{half} came back with {len(stamps)} hours, expected {expected}")
+
+    times = np.array(
+        [datetime.strptime(stamp, "%Y%m%dT%H") for stamp in stamps], dtype="datetime64[ns]"
+    )
+    if np.any(np.diff(times) != np.timedelta64(1, "h")):
+        raise ValueError(f"{year} h{half} is not a contiguous hourly series")
+
+    return _write_half(config, lattice, times, np.concatenate(blocks), year, half)
 
 
 def fetch_era5(config: Config, years: list[int], force: bool = False) -> list[Path]:
     """Download every variable and half-year, skipping what is already cached."""
-    import cdsapi
+    import ee
 
-    unknown = sorted(set(config.meteo.variables) - set(SHORT_NAMES))
+    unknown = sorted(set(config.meteo.variables) - set(GEE_BANDS))
     if unknown:
-        raise ValueError(f"No NetCDF short name known for {unknown}; extend SHORT_NAMES")
+        raise ValueError(f"No Earth Engine band known for {unknown}; extend GEE_BANDS")
 
     targets = [
         cache_path(config, variable, year, half)
@@ -200,80 +345,44 @@ def fetch_era5(config: Config, years: list[int], force: bool = False) -> list[Pa
         for variable in config.meteo.variables
         for half in HALVES
     ]
-    queue = _pending(config, years, force)
+    queue = [
+        (year, half)
+        for year in years
+        for half in HALVES
+        if force
+        or not all(
+            cache_path(config, name, year, half).is_file() for name in config.meteo.variables
+        )
+    ]
     if not queue:
         logger.info("All %d chunk(s) already cached", len(targets))
         return targets
 
-    client = cdsapi.Client(
-        timeout=config.meteo.request_timeout_s,
-        progress=False,
-        quiet=True,
-        wait_until_complete=False,
+    ee.Initialize(project=config.sources.gee_project)
+    lattice = bbox_lattice(config)
+    logger.info(
+        "Fetching %d half-year(s) over %d x %d cells, %d hour windows, %d at a time",
+        len(queue),
+        lattice.n_rows,
+        lattice.n_cols,
+        config.meteo.gee_window_hours,
+        config.meteo.gee_workers,
     )
-    logger.info("Fetching %d chunk(s), up to %d in flight", len(queue), config.meteo.max_in_flight)
 
-    total = len(queue)
-    written = 0
-    cooldown_until = 0.0
-    cooldown = float(config.meteo.poll_interval_s)
-    in_flight: list[tuple[_Chunk, object]] = []
-
-    while queue or in_flight:
-        throttled = False
-        while (
-            queue
-            and len(in_flight) < config.meteo.max_in_flight
-            and time.monotonic() >= cooldown_until
-        ):
-            chunk = queue.pop(0)
-            try:
-                request = _request(config, chunk.variable, chunk.year, chunk.half)
-                job = client.retrieve(config.meteo.dataset, request)
-            except Exception as error:
-                throttled |= _defer(chunk, error, config, queue)
-                break
-            in_flight.append((chunk, job))
-
-        ready: list[tuple[_Chunk, object]] = []
-        waiting: list[tuple[_Chunk, object]] = []
-        for chunk, job in in_flight:
-            try:
-                (ready if job.results_ready else waiting).append((chunk, job))  # type: ignore[attr-defined]
-            except Exception as error:
-                throttled |= _defer(chunk, error, config, queue)
-        in_flight = waiting
-
-        for chunk, job in ready:
-            _collect(job, chunk.target)
-            written += 1
-            logger.info(
-                "[%d/%d] %s -> %s (%.1f MB)",
-                written,
-                total,
-                chunk,
-                chunk.target.name,
-                chunk.target.stat().st_size / 1e6,
-            )
-
-        if throttled:
-            logger.warning(
-                "CDS queue is full, holding %d chunk(s) for %.0fs (%d in flight)",
-                len(queue),
-                cooldown,
-                len(in_flight),
-            )
-            cooldown_until = time.monotonic() + cooldown
-            cooldown = min(cooldown * 2, _MAX_COOLDOWN_S)
-        elif ready:
-            cooldown = float(config.meteo.poll_interval_s)
-
-        if not ready and (in_flight or queue):
-            time.sleep(config.meteo.poll_interval_s)
-
-        if not ready and in_flight:
-            time.sleep(config.meteo.poll_interval_s)
-
+    for index, (year, half) in enumerate(queue, start=1):
+        started = time.monotonic()
+        written = _fetch_half(config, lattice, year, half)
+        size = sum(path.stat().st_size for path in written)
+        logger.info(
+            "[%d/%d] %d h%d -> %d file(s) (%.1f MB, %.0fs)",
+            index,
+            len(queue),
+            year,
+            half,
+            len(written),
+            size / 1e6,
+            time.monotonic() - started,
+        )
     return targets
 
 
@@ -324,12 +433,6 @@ def _normalize(dataset: xr.Dataset) -> xr.Dataset:
     """Give every download the same dimension names and axis directions."""
     if "valid_time" in dataset.dims:
         dataset = dataset.rename({"valid_time": "time"})
-
-    for dim in _SURPLUS_DIMS:
-        if dim in dataset.dims:
-            dataset = dataset.isel({dim: 0}, drop=True)
-        elif dim in dataset.coords:
-            dataset = dataset.drop_vars(dim)
 
     if dataset["latitude"][0] < dataset["latitude"][-1]:
         dataset = dataset.isel(latitude=slice(None, None, -1))

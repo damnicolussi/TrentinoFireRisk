@@ -109,12 +109,8 @@ class BBoxWGS84(BaseModel):
             raise ValueError(f"east ({self.east}) must exceed west ({self.west})")
         return self
 
-    def as_cds_area(self) -> list[float]:
-        """CDS `area` ordering: north, west, south, east."""
-        return [self.north, self.west, self.south, self.east]
-
     def as_bounds(self) -> list[float]:
-        """Standard GIS/GEE ordering: xmin, ymin, xmax, ymax."""
+        """Earth Engine ordering: xmin, ymin, xmax, ymax."""
         return [self.west, self.south, self.east, self.north]
 
 
@@ -163,14 +159,11 @@ class GeographyConfig(BaseModel):
 class MeteoConfig(BaseModel):
     model_config = _STRICT
 
-    dataset: str
     variables: list[str] = Field(min_length=1)
     utc_offset_hours: int = Field(ge=-12, le=14)
     spinup_years: int = Field(ge=0)
-    retry_attempts: int = Field(gt=0)
-    request_timeout_s: int = Field(gt=0)
-    max_in_flight: int = Field(gt=0)
-    poll_interval_s: int = Field(gt=0)
+    gee_workers: int = Field(gt=0)
+    gee_window_hours: int = Field(gt=0)
     precip_windows: list[int] = Field(min_length=1)
     temp_window_days: int = Field(gt=0)
     rh_window_days: int = Field(gt=0)

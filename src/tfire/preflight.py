@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import logging
-import tempfile
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from pathlib import Path
 
 from tfire.config import Config
 
@@ -15,7 +13,6 @@ logger = logging.getLogger(__name__)
 # fixed midsummer date so the plausibility bounds below actually mean something
 _PROBE_DATE = ("2020", "07", "15")
 _PROBE_TIME = "12:00"
-_ERA5_DATASET = "reanalysis-era5-land"
 _ERA5_VARIABLE = "2m_temperature"
 _KELVIN_OFFSET = 273.15
 _PLAUSIBLE_TEMP_C = (10.0, 35.0)
@@ -42,60 +39,66 @@ class AccessCheck:
             logger.error("%s access FAILED: %s", self.source, self.detail)
 
 
-def check_cds(config: Config) -> AccessCheck:
-    """Download one hour of ERA5-Land 2m temperature cropped to the province.
+def check_era5(config: Config) -> AccessCheck:
+    """Reduce one midday hour of ERA5-Land 2m temperature over the province.
 
-    Verifies the API token, that the ERA5-Land license has been accepted,
-    server-side cropping, and that the NetCDF backend can open the result.
+    Verifies the collection is reachable on the 0.1 degree lattice the fetcher assumes,
+    and that the values arrive in kelvin rather than already converted.
     """
-    import cdsapi
-    import xarray as xr
+    import ee
 
-    year, month, day = _PROBE_DATE
-    request = {
-        "variable": [_ERA5_VARIABLE],
-        "year": year,
-        "month": month,
-        "day": day,
-        "time": [_PROBE_TIME],
-        "area": config.sources.bbox_wgs84.as_cds_area(),
-        "data_format": "netcdf",
-        "download_format": "unarchived",
-    }
+    from tfire.sources.era5land import (
+        GEE_BANDS,
+        GEE_COLLECTION,
+        RESOLUTION_DEG,
+        bbox_lattice,
+    )
 
-    logger.info("Requesting %s from CDS; a queue wait of a few minutes is normal", _ERA5_DATASET)
+    lattice = bbox_lattice(config)
+    band = GEE_BANDS[_ERA5_VARIABLE]
+    stamp = "-".join(_PROBE_DATE)
     try:
-        with tempfile.TemporaryDirectory() as tmp:
-            target = Path(tmp) / "era5land_probe.nc"
-            cdsapi.Client().retrieve(_ERA5_DATASET, request, str(target))
-            size_kb = target.stat().st_size / 1024
-
-            with xr.open_dataset(target) as dataset:
-                name = next(iter(dataset.data_vars))
-                grid = dataset[name].squeeze()
-                celsius = float(grid.mean()) - _KELVIN_OFFSET
-                shape = tuple(grid.shape)
-                cells = int(grid.size)
+        ee.Initialize(project=config.sources.gee_project)
+        region = ee.Geometry.Rectangle(config.sources.bbox_wgs84.as_bounds())
+        image = (
+            ee.ImageCollection(GEE_COLLECTION)
+            .filterDate(f"{stamp}T{_PROBE_TIME}", f"{stamp}T{_PROBE_TIME[:2]}:59")
+            .select([band])
+            .first()
+        )
+        reduced = image.reduceRegion(
+            reducer=ee.Reducer.mean(),
+            geometry=region,
+            crs="EPSG:4326",
+            scale=RESOLUTION_DEG * 111320,
+            maxPixels=int(1e6),
+        ).getInfo()
+        transform = image.select(band).projection().getInfo()["transform"]
     except Exception as error:  # noqa: BLE001  any failure here is a failed check
-        return AccessCheck("CDS", ok=False, detail=f"{type(error).__name__}: {error}")
+        return AccessCheck("ERA5", ok=False, detail=f"{type(error).__name__}: {error}")
 
-    if cells <= 1:
+    kelvin = reduced.get(band)
+    if kelvin is None:
+        return AccessCheck("ERA5", ok=False, detail="reduction returned no temperature")
+
+    if abs(transform[0]) != RESOLUTION_DEG or abs(transform[4]) != RESOLUTION_DEG:
         return AccessCheck(
-            "CDS", ok=False, detail=f"expected a grid over the province, got {shape}"
+            "ERA5", ok=False, detail=f"expected a {RESOLUTION_DEG} degree grid, got {transform}"
         )
 
+    celsius = float(kelvin) - _KELVIN_OFFSET
     low, high = _PLAUSIBLE_TEMP_C
     if not low < celsius < high:
         return AccessCheck(
-            "CDS", ok=False, detail=f"implausible July midday temperature: {celsius:.1f} C"
+            "ERA5", ok=False, detail=f"implausible July midday temperature: {celsius:.1f} C"
         )
 
     return AccessCheck(
-        "CDS",
+        "ERA5",
         ok=True,
         detail=(
-            f"{_ERA5_DATASET} {_ERA5_VARIABLE}, {size_kb:.1f} KB, "
-            f"grid {shape}, mean {celsius:.1f} C"
+            f"{GEE_COLLECTION} {band}, {lattice.n_rows}x{lattice.n_cols} lattice, "
+            f"mean {celsius:.1f} C"
         ),
     )
 
@@ -179,7 +182,7 @@ def check_landsat(config: Config) -> AccessCheck:
 
 
 CHECKS: dict[str, Callable[[Config], AccessCheck]] = {
-    "cds": check_cds,
+    "era5": check_era5,
     "gee": check_gee,
     "landsat": check_landsat,
 }

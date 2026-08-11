@@ -17,7 +17,7 @@ from tfire.features.meteo import (
     trailing_sum,
     wind_speed_direction,
 )
-from tfire.sources.era5land import Lattice, half_months, is_permanent, is_throttle
+from tfire.sources.era5land import Lattice, half_months
 
 _CALM = {"t2m": 283.15, "d2m": 278.15, "sp": 95000.0, "tp": 0.0, "u10": 0.0, "v10": 0.0}
 
@@ -188,41 +188,6 @@ def test_trailing_sum_ends_on_the_current_day(window: int) -> None:
     lifted = values.copy()
     lifted[-1] = 1e6
     assert trailing_sum(lifted, window)[-2, 0] == pytest.approx(total[-2, 0])
-
-
-@pytest.mark.parametrize(
-    ("message", "permanent", "throttle"),
-    [
-        # the CDS accepts the submission and rejects it seconds later when its per-dataset
-        # queue is full. Resubmitting works, so this must not consume the chunk's attempts.
-        ("The job has been rejected", False, True),
-        ("Number queued requests for this dataset is temporarily limited", False, True),
-        # the request itself is unacceptable and will be however often it is sent
-        ("cost limits exceeded. Your request is too large", True, False),
-        ("required licence not accepted", True, False),
-        # anything else is an ordinary failure: retried, but on a budget
-        ("Connection reset by peer", False, False),
-    ],
-    ids=["rejected", "queue limited", "too large", "licence", "network"],
-)
-def test_cds_failures_are_told_apart(message: str, permanent: bool, throttle: bool) -> None:
-    error = RuntimeError(message)
-    assert is_permanent(error) is permanent
-    assert is_throttle(error) is throttle
-
-
-class _Response:
-    def __init__(self, text: str) -> None:
-        self.text = text
-
-
-def test_a_rejection_is_read_from_the_response_body() -> None:
-    # requests puts only the status line in str(error); the reason lives in the body
-    error = RuntimeError("400 Client Error: Bad Request for url: https://cds/jobs/x/results")
-    error.response = _Response('{"title": "The job has been rejected"}')  # type: ignore[attr-defined]
-
-    assert is_throttle(error)
-    assert not is_permanent(error)
 
 
 @pytest.mark.parametrize(

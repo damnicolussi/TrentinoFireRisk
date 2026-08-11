@@ -33,7 +33,7 @@ dependencies = [
     "tqdm>=4.67",             # progress on long downloads
     # HTTP
     "requests>=2.32",         # Open-Meteo forecast API
-    "tenacity>=9.0",          # retry logic for CDS and GEE calls
+    "tenacity>=9.0",          # retry logic for Earth Engine calls
 ]
 
 # Staged by milestone so an install stays tractable. `all` pulls everything.
@@ -48,10 +48,9 @@ sources = [
     "netCDF4>=1.7",           # ERA5-Land NetCDF backend
     "zarr>=3.0",              # Mesogeos storage format
     "dask>=2024.10",          # chunked processing of long time series
-    "cdsapi>=0.7.7",          # Copernicus CDS client (ERA5-Land)
     "xclim>=0.61",            # Canadian FWI and sub-indices, with seasonal spin-up
     # Remote sensing (M6 vegetation)
-    "earthengine-api>=1.6",   # MODIS and Sentinel-2 access
+    "earthengine-api>=1.6",   # ERA5-Land, Landsat and DEM access
     # Human activity (M7)
     "osmnx>=2.0",             # OpenStreetMap roads, railways, POIs
     "holidays>=0.60",         # Italian public holidays for is_holiday
@@ -112,7 +111,6 @@ module = [
     "shapely.*",
     "pyogrio.*",
     "pyproj.*",
-    "cdsapi.*",
     "ee.*",
     "rasterio.*",
     "rioxarray.*",
