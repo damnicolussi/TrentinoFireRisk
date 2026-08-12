@@ -117,6 +117,7 @@ module = [
     "rasterstats.*",
     "xclim.*",
     "osmnx.*",
+    "holidays.*",
 ]
 ignore_missing_imports = true
 

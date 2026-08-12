@@ -106,6 +106,28 @@ class GridSpec:
         x_index, y_index = self.cell_index(cell_id)
         return gpd.GeoSeries(self._boxes(x_index, y_index), crs=self.crs)
 
+    def sub_points(
+        self, cell_id: npt.ArrayLike, n_per_side: int
+    ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+        """`n_per_side**2` evenly spaced points per cell, shape `(len(cell_id), n_per_side**2)`.
+
+        Offsets stay strictly inside `(0, resolution_m)`, so a sub-point never lands exactly on
+        a shared edge between two cells.
+        """
+        if n_per_side < 1:
+            raise ValueError(f"n_per_side must be positive, got {n_per_side}")
+
+        x_index, y_index = self.cell_index(cell_id)
+        left = self.xmin + x_index * self.resolution_m
+        top = self.ymax - y_index * self.resolution_m
+
+        offset = (np.arange(n_per_side) + 0.5) / n_per_side * self.resolution_m
+        dx, dy = np.meshgrid(offset, offset)
+
+        x = left[:, None] + dx.ravel()[None, :]
+        y = top[:, None] - dy.ravel()[None, :]
+        return x, y
+
     def _boxes(self, x_index: npt.NDArray[Any], y_index: npt.NDArray[Any]) -> npt.NDArray[Any]:
         left = self.xmin + x_index * self.resolution_m
         top = self.ymax - y_index * self.resolution_m

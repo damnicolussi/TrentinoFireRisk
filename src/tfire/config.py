@@ -73,6 +73,11 @@ class PathsConfig(BaseModel):
     vegetation_out: Path
     vegetation_climatology_out: Path
     vegetation_missingness_out: Path
+    pat_natura2000: Path
+    osm_cache: Path
+    worldpop_raster: Path
+    human_out: Path
+    human_population_out: Path
 
 
 class CorineConfig(BaseModel):
@@ -235,6 +240,28 @@ class VegetationConfig(BaseModel):
         return self
 
 
+class HumanConfig(BaseModel):
+    model_config = _STRICT
+
+    osm_distance_subpoints_per_side: int = Field(gt=0)
+    osm_overpass_timeout_s: int = Field(gt=0)
+    natura2000_threshold: float = Field(gt=0, le=1)
+    worldpop_collection: str
+    worldpop_years: list[int] = Field(min_length=1)
+    max_pop_density_km2: float = Field(gt=0)
+
+    @model_validator(mode="after")
+    def check_worldpop_years(self) -> HumanConfig:
+        years = self.worldpop_years
+        if sorted(set(years)) != years:
+            raise ValueError(
+                f"worldpop_years must be strictly increasing with no duplicates: {years}"
+            )
+        if any(not (2000 <= year <= 2020) for year in years):
+            raise ValueError(f"WorldPop/GP/100m/pop covers 2000-2020, got {years}")
+        return self
+
+
 class SamplingConfig(BaseModel):
     model_config = _STRICT
 
@@ -268,6 +295,7 @@ class Config(BaseModel):
     meteo: MeteoConfig
     fwi: FWIConfig
     vegetation: VegetationConfig
+    human: HumanConfig
     sampling: SamplingConfig
     logging: LoggingConfig
 

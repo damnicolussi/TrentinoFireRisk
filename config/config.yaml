@@ -36,6 +36,11 @@ paths:
   vegetation_out: "data/interim/vegetation.parquet"
   vegetation_climatology_out: "data/interim/vegetation_climatology.parquet"
   vegetation_missingness_out: "data/interim/vegetation_missingness.parquet"
+  pat_natura2000: "data/raw/natura2000/Habitat_2019.shp"
+  osm_cache: "data/raw/osm/cache"
+  worldpop_raster: "data/raw/worldpop/pop_density.tif"
+  human_out: "data/interim/human.parquet"
+  human_population_out: "data/interim/human_population.parquet"
 
 corine:
   # 5 km of slack around the boundary. A 500 m cell straddling the border needs
@@ -191,6 +196,27 @@ vegetation:
   max_index: 1.0
   min_lst_c: -50.0
   max_lst_c: 60.0
+
+human:
+  # sub-points per side of an evenly spaced grid inside each 500 m cell, used to estimate
+  # dist_*_{mean,std} via a shapely STRtree. OSM isn't on Earth Engine, so there is no
+  # server-side reduceResolution the way DEM sub-pixels get one; this is the local
+  # equivalent. 5x5 = 25 points/cell is enough given how sparse the road/rail/waterway
+  # network is relative to a 500 m cell.
+  osm_distance_subpoints_per_side: 5
+
+  osm_overpass_timeout_s: 300
+
+  # majority rule, same convention as geography.waterbody_threshold
+  natura2000_threshold: 0.5
+
+  # WorldPop/GP/100m/pop covers 2000-2020. Five editions mirror corine.editions' choice of
+  # a handful of representative years rather than fetching all 21 annual layers.
+  worldpop_collection: "WorldPop/GP/100m/pop"
+  worldpop_years: [2000, 2005, 2010, 2015, 2020]
+
+  # plausibility ceiling for the province's most crowded cell (central Trento)
+  max_pop_density_km2: 20000.0
 
 sampling:
   negative_ratio: 10

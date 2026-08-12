@@ -23,6 +23,10 @@ _MODIS_SCALE_M = 250
 _MODIS_WINDOW = ("2020-07-01", "2020-07-31")
 _PLAUSIBLE_NDVI = (0.3, 0.95)
 
+_OSM_PROBE_BBOX = (11.115, 46.065, 11.130, 46.080)  # ~1 km around Trento railway station
+_WORLDPOP_SCALE_M = 100
+_PLAUSIBLE_POP_DENSITY = (10.0, 1000.0)  # province average; mountainous and sparse
+
 
 @dataclass(frozen=True)
 class AccessCheck:
@@ -181,10 +185,67 @@ def check_landsat(config: Config) -> AccessCheck:
     return AccessCheck("Landsat", ok=True, detail=f"{sum(counts.values())} scene(s): {scenes}")
 
 
+def check_osm(config: Config) -> AccessCheck:
+    """One small Overpass query near a known landmark (Trento railway station)."""
+    import osmnx as ox
+
+    from tfire.sources.osm import _configure_cache
+
+    try:
+        _configure_cache(config)
+        features = ox.features.features_from_bbox(bbox=_OSM_PROBE_BBOX, tags={"railway": True})
+    except Exception as error:  # noqa: BLE001  any failure here is a failed check
+        return AccessCheck("OSM", ok=False, detail=f"{type(error).__name__}: {error}")
+
+    if features.empty:
+        return AccessCheck("OSM", ok=False, detail="no railway feature near Trento station")
+    return AccessCheck("OSM", ok=True, detail=f"{len(features)} feature(s) near Trento station")
+
+
+def check_worldpop(config: Config) -> AccessCheck:
+    """Reduce one WorldPop year over the province bbox, server side."""
+    import ee
+
+    try:
+        ee.Initialize(project=config.sources.gee_project)
+        region = ee.Geometry.Rectangle(config.sources.bbox_wgs84.as_bounds())
+        year = config.human.worldpop_years[-1]
+        counts = (
+            ee.ImageCollection(config.human.worldpop_collection)
+            .filter(ee.Filter.eq("year", year))
+            .mosaic()
+            .select("population")
+        )
+        total = (
+            counts.reduceRegion(
+                reducer=ee.Reducer.sum(),
+                geometry=region,
+                scale=_WORLDPOP_SCALE_M,
+                maxPixels=int(1e9),
+            )
+            .get("population")
+            .getInfo()
+        )
+        area_km2 = region.area().getInfo() / 1e6
+    except Exception as error:  # noqa: BLE001  any failure here is a failed check
+        return AccessCheck("WorldPop", ok=False, detail=f"{type(error).__name__}: {error}")
+
+    if total is None:
+        return AccessCheck("WorldPop", ok=False, detail="reduction returned no population")
+
+    density = float(total) / area_km2
+    low, high = _PLAUSIBLE_POP_DENSITY
+    if not low < density < high:
+        return AccessCheck("WorldPop", ok=False, detail=f"implausible density: {density:.1f}/km2")
+    return AccessCheck("WorldPop", ok=True, detail=f"{year}: {density:.1f}/km2 over the bbox")
+
+
 CHECKS: dict[str, Callable[[Config], AccessCheck]] = {
     "era5": check_era5,
     "gee": check_gee,
     "landsat": check_landsat,
+    "osm": check_osm,
+    "worldpop": check_worldpop,
 }
 
 
