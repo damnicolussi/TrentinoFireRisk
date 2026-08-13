@@ -1,0 +1,231 @@
+# What `trentino_dataset.parquet` is allowed to contain. A column not declared here is an
+# error, and so is a declared column that does not arrive.
+#
+# Values on a category are defaults for every column under it; a column entry overrides them.
+# `min` and `max` are plausibility bounds, not observed extremes.
+
+categories:
+  identity:
+    source: "M3 sampling"
+    role: key
+    columns:
+      sample_id: {dtype: int32}
+      cell_id: {dtype: int32}
+      date: {dtype: "datetime64[us]"}
+
+  labels:
+    source: "PAT fire cadastre"
+    role: label
+    columns:
+      is_fire: {dtype: bool}
+      is_near_fire: {dtype: bool}
+      fire_id: {dtype: Int64, nullable: true}
+      n_fires: {dtype: int16}
+
+  provenance:
+    source: "join keys resolved at assembly"
+    role: diagnostic
+    columns:
+      clc_edition: {dtype: int16}
+      worldpop_year: {dtype: int16}
+      veg_composite_date: {dtype: "datetime64[us]", nullable: true}
+      natura2000_fraction: {dtype: float32, min: 0.0, max: 1.0}
+
+  topography:
+    source: "Copernicus DEM GLO-30 via Earth Engine"
+    temporal: static
+    forecastable: true
+    dtype: float32
+    columns:
+      elevation_mean: {min: "config:topography.min_elevation_m", max: "config:topography.max_elevation_m"}
+      elevation_std: {min: 0.0, max: 1000.0}
+      slope_mean: {min: 0.0, max: 90.0}
+      slope_std: {min: 0.0, max: 90.0}
+      roughness_mean: {min: 0.0, max: 1000.0}
+      roughness_std: {min: 0.0, max: 1000.0}
+      aspect_NODATA: {min: 0.0, max: 1.0}
+      aspect_1: {min: 0.0, max: 1.0}
+      aspect_2: {min: 0.0, max: 1.0}
+      aspect_3: {min: 0.0, max: 1.0}
+      aspect_4: {min: 0.0, max: 1.0}
+      aspect_5: {min: 0.0, max: 1.0}
+      aspect_6: {min: 0.0, max: 1.0}
+      aspect_7: {min: 0.0, max: 1.0}
+      aspect_8: {min: 0.0, max: 1.0}
+
+  geography:
+    source: "grid lattice; PAT hydrography"
+    temporal: static
+    forecastable: true
+    dtype: float32
+    columns:
+      # EPSG:25832 easting and northing of the cell center, bounded by the province
+      x_coordinate: {dtype: float64, min: 600000.0, max: 740000.0}
+      y_coordinate: {dtype: float64, min: 5050000.0, max: 5170000.0}
+      waterbody_fraction: {min: 0.0, max: 1.0}
+      is_waterbody: {dtype: bool}
+
+  landcover:
+    source: "CORINE Land Cover, edition nearest in time"
+    temporal: static
+    forecastable: true
+    dtype: float32
+    min: 0.0
+    max: 1.0
+    columns:
+      CLC_1: {}
+      CLC_2: {}
+      CLC_3: {}
+      CLC_4: {}
+      CLC_5: {}
+      CLC_6: {}
+      CLC_7: {}
+      CLC_8: {}
+      CLC_9: {}
+      CLC_10: {}
+      CLC_11: {}
+      CLC_12: {}
+      CLC_13: {}
+      CLC_14: {}
+      CLC_15: {}
+      CLC_16: {}
+      CLC_17: {}
+      CLC_18: {}
+      CLC_19: {}
+      CLC_20: {}
+      CLC_21: {}
+      CLC_22: {}
+      CLC_23: {}
+      CLC_24: {}
+      CLC_25: {}
+      CLC_26: {}
+      CLC_27: {}
+      CLC_28: {}
+      CLC_29: {}
+      CLC_30: {}
+      CLC_31: {}
+      CLC_32: {}
+      CLC_33: {}
+      CLC_34: {}
+      CLC_35: {}
+      CLC_36: {}
+      CLC_37: {}
+      CLC_38: {}
+      CLC_39: {}
+      CLC_40: {}
+      CLC_41: {}
+      CLC_42: {}
+      CLC_43: {}
+      CLC_44: {}
+      CLC_L2_11: {}
+      CLC_L2_12: {}
+      CLC_L2_13: {}
+      CLC_L2_14: {}
+      CLC_L2_21: {}
+      CLC_L2_22: {}
+      CLC_L2_23: {}
+      CLC_L2_24: {}
+      CLC_L2_31: {}
+      CLC_L2_32: {}
+      CLC_L2_33: {}
+      CLC_L2_41: {}
+      CLC_L2_42: {}
+      CLC_L2_51: {}
+      CLC_L2_52: {}
+      CLC_L1_1: {}
+      CLC_L1_2: {}
+      CLC_L1_3: {}
+      CLC_L1_4: {}
+      CLC_L1_5: {}
+
+  human:
+    source: "OpenStreetMap; Natura 2000 (PAT); WorldPop"
+    temporal: static
+    forecastable: true
+    dtype: float32
+    columns:
+      # distances are metric, over the 25 sub-points of a 500 m cell: the mean can reach the
+      # width of the province, the spread cannot exceed the cell's own diagonal
+      dist_roads_mean: {min: 0.0, max: 100000.0}
+      dist_roads_std: {min: 0.0, max: 500.0}
+      dist_railways_mean: {min: 0.0, max: 100000.0}
+      dist_railways_std: {min: 0.0, max: 500.0}
+      dist_waterways_mean: {min: 0.0, max: 100000.0}
+      dist_waterways_std: {min: 0.0, max: 500.0}
+      recreational_poi_density: {min: 0.0, max: 1000.0}
+      accommodation_density: {min: 0.0, max: 1000.0}
+      natura2000: {dtype: bool}
+      pop_density: {min: 0.0, max: "config:human.max_pop_density_km2"}
+
+  calendar:
+    source: "derived from the date, no external source"
+    temporal: dynamic
+    forecastable: true
+    columns:
+      month: {dtype: int8, min: 1, max: 12}
+      season: {dtype: category}
+      day_of_week: {dtype: int8, min: 0, max: 6}
+      is_weekend: {dtype: bool}
+      is_holiday: {dtype: bool}
+
+  vegetation:
+    source: "Landsat C2 L2 monthly composites, last one ending before the sample date"
+    temporal: dynamic
+    forecastable: true
+    dtype: float32
+    nullable: true
+    columns:
+      ndvi: {min: "config:vegetation.min_index", max: "config:vegetation.max_index"}
+      ndwi: {min: "config:vegetation.min_index", max: "config:vegetation.max_index"}
+      nbr: {min: "config:vegetation.min_index", max: "config:vegetation.max_index"}
+      lst: {min: "config:vegetation.min_lst_c", max: "config:vegetation.max_lst_c"}
+      valid_fraction: {min: 0.0, max: 1.0}
+      snow_fraction: {min: 0.0, max: 1.0}
+      age_days: {min: 0.0, max: "config:vegetation.max_fill_days"}
+
+  meteo:
+    source: "ERA5-Land, bilinear from the four surrounding backbone cells"
+    temporal: dynamic
+    forecastable: true
+    dtype: float32
+    columns:
+      temp_mean: {min: "config:meteo.min_temp_c", max: "config:meteo.max_temp_c"}
+      temp_min: {min: "config:meteo.min_temp_c", max: "config:meteo.max_temp_c"}
+      temp_max: {min: "config:meteo.min_temp_c", max: "config:meteo.max_temp_c"}
+      temp_range: {min: 0.0, max: 60.0}
+      rh_mean: {min: 0.0, max: 100.0}
+      rh_min: {min: 0.0, max: 100.0}
+      rh_max: {min: 0.0, max: 100.0}
+      rh_range: {min: 0.0, max: 100.0}
+      pres_mean: {min: "config:meteo.min_pressure_hpa", max: "config:meteo.max_pressure_hpa"}
+      pres_min: {min: "config:meteo.min_pressure_hpa", max: "config:meteo.max_pressure_hpa"}
+      pres_max: {min: "config:meteo.min_pressure_hpa", max: "config:meteo.max_pressure_hpa"}
+      pres_range: {min: 0.0, max: 100.0}
+      precip_sum: {min: 0.0, max: "config:meteo.max_precip_mm"}
+      wind_speed_mean: {min: 0.0, max: 100.0}
+      wind_speed_max: {min: 0.0, max: 100.0}
+      wind_dir_mean: {min: 0.0, max: 360.0}
+      wind_dir_at_max: {min: 0.0, max: 360.0}
+      temp_noon: {min: "config:meteo.min_temp_c", max: "config:meteo.max_temp_c"}
+      rh_noon: {min: 0.0, max: 100.0}
+      wind_speed_noon: {min: 0.0, max: 100.0}
+      precip_noon24: {min: 0.0, max: "config:meteo.max_precip_mm"}
+      # a cumulative window can hold several days at the daily ceiling
+      precip_cum7: {min: 0.0, max: 1000.0}
+      precip_cum15: {min: 0.0, max: 1500.0}
+      precip_cum30: {min: 0.0, max: 2000.0}
+      temp_mean_3d: {min: "config:meteo.min_temp_c", max: "config:meteo.max_temp_c"}
+      rh_mean_7d: {min: 0.0, max: 100.0}
+
+  fwi:
+    source: "Canadian FWI on the ERA5-Land backbone, nearest cell"
+    temporal: dynamic
+    forecastable: true
+    dtype: float32
+    columns:
+      fwi: {min: 0.0, max: "config:fwi.max_fwi"}
+      ffmc: {min: 0.0, max: "config:fwi.max_ffmc"}
+      dmc: {min: 0.0, max: "config:fwi.max_dmc"}
+      dc: {min: 0.0, max: "config:fwi.max_dc"}
+      isi: {min: 0.0, max: "config:fwi.max_isi"}
+      bui: {min: 0.0, max: "config:fwi.max_bui"}

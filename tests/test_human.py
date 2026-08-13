@@ -43,35 +43,31 @@ def test_sub_point_distance_stats_is_nan_when_the_layer_is_empty() -> None:
     assert np.isnan(std).all()
 
 
-def test_poi_frame_sums_capacity_with_the_tag_fallback_order(
+def test_poi_frame_counts_both_kinds_of_presence_over_the_same_cell_area(
     config: Config, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """cell 0: hotel with only `capacity` set, alpine_hut with only `beds` set -> 20 + 8 = 28,
-        and the alpine_hut also counts toward recreational_poi_density.
-    cell 1: a parking POI (recreational, not accommodation) and a bed_and_breakfast whose
-        only capacity signal is `rooms` -> accommodation_capacity comes out to 4.
-    cell 2: an accommodation POI (hostel) with no beds/capacity/rooms tag at all -> the cell
-        is not dropped from the output, but its capacity is unknown (NaN), not zero.
-    cell 3: no POI at all -> zero recreational density and zero accommodation capacity.
+    """cell 0: a hotel and an alpine_hut. The hut is lodging and a day destination at once, so
+        it counts toward both features: 2 accommodation and 1 recreational over the cell area.
+    cell 1: a parking POI (recreational only) and a bed_and_breakfast (accommodation only).
+    cell 2: a hostel carrying no size tag, which still has to register as lodging.
+    cell 3: no POI at all -> zero on both, never null.
     """
     poi = gpd.GeoDataFrame(
         {
             "tourism": ["hotel", "alpine_hut", np.nan, "bed_and_breakfast", "hostel"],
             "amenity": [np.nan, np.nan, "parking", np.nan, np.nan],
-            "beds": [np.nan, 8.0, np.nan, np.nan, np.nan],
-            "capacity": [20.0, np.nan, np.nan, np.nan, np.nan],
-            "rooms": [10.0, np.nan, np.nan, 4.0, np.nan],
         },
         geometry=[Point(5, 5), Point(6, 6), Point(15, 5), Point(12, 8), Point(25, 5)],
         crs=CRS,
     )
     monkeypatch.setattr(osm, "fetch_poi", lambda config: poi)
 
-    frame = poi_frame(POI_GRID, np.array([0, 1, 2, 3]), config)
+    frame = poi_frame(POI_GRID, np.array([0, 1, 2, 3]), config).set_index("cell_id")
 
-    frame = frame.set_index("cell_id")
-    np.testing.assert_allclose(frame["accommodation_capacity"], [28.0, 4.0, np.nan, 0.0])
-    np.testing.assert_allclose(frame["recreational_poi_density"] > 0, [True, True, False, False])
+    per_km2 = 1 / (POI_GRID.resolution_m / 1000) ** 2
+    np.testing.assert_allclose(frame["accommodation_density"], np.array([2, 1, 1, 0]) * per_km2)
+    np.testing.assert_allclose(frame["recreational_poi_density"], np.array([1, 1, 0, 0]) * per_km2)
+    assert not frame.isna().to_numpy().any()
 
 
 @pytest.mark.parametrize(

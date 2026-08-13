@@ -8,7 +8,6 @@ from typing import Final
 import geopandas as gpd
 import numpy as np
 import osmnx as ox
-import pandas as pd
 from tenacity import before_sleep_log, retry, stop_after_attempt, wait_exponential
 
 from tfire.config import Config
@@ -68,10 +67,6 @@ ACCOMMODATION_TOURISM_VALUES: Final = frozenset(
     }
 )
 
-# fallback order when summing beds: prefer an explicit bed count, then generic capacity, then
-# room count.
-CAPACITY_TAG_PRIORITY: Final = ("beds", "capacity", "rooms")
-
 
 def _configure_cache(config: Config) -> None:
     cache_dir = config.path(config.paths.osm_cache)
@@ -126,9 +121,6 @@ def fetch_poi(config: Config) -> gpd.GeoDataFrame:
     points = gpd.GeoDataFrame(geometry=raw.geometry.centroid, crs=config.crs)
     for tag in ("tourism", "amenity"):
         points[tag] = raw[tag] if tag in raw.columns else np.nan
-    for tag in CAPACITY_TAG_PRIORITY:
-        values = raw[tag] if tag in raw.columns else pd.Series(np.nan, index=raw.index)
-        points[tag] = pd.to_numeric(values, errors="coerce")
 
     logger.info("OSM POI: %d feature(s) over the bbox", len(points))
     return points

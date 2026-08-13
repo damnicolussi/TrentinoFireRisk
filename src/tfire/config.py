@@ -78,6 +78,8 @@ class PathsConfig(BaseModel):
     worldpop_raster: Path
     human_out: Path
     human_population_out: Path
+    dataset_out: Path
+    quality_report_out: Path
 
 
 class CorineConfig(BaseModel):
@@ -272,6 +274,13 @@ class SamplingConfig(BaseModel):
     expected_positives: int = Field(gt=0)
 
 
+class DatasetConfig(BaseModel):
+    model_config = _STRICT
+
+    expected_rows: int = Field(gt=0)
+    expected_features: int = Field(gt=0)
+
+
 class LoggingConfig(BaseModel):
     model_config = _STRICT
 
@@ -297,6 +306,7 @@ class Config(BaseModel):
     vegetation: VegetationConfig
     human: HumanConfig
     sampling: SamplingConfig
+    dataset: DatasetConfig
     logging: LoggingConfig
 
     project_root: Path

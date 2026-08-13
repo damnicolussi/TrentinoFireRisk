@@ -208,22 +208,6 @@ def preceding_composite(dates: pd.Series, composites: Iterable[date]) -> pd.Seri
     )
 
 
-def add_anomalies(vegetation: pd.DataFrame, climatology: pd.DataFrame) -> pd.DataFrame:
-    """Departure from the cell's seasonal normal, in units and in standard deviations."""
-    joined = vegetation.copy()
-    joined["month"] = joined["date"].dt.month.astype("int16")
-    joined = joined.merge(climatology, on=["cell_id", "month"], how="left")
-
-    for name in VALUE_NAMES:
-        deviation = joined[name] - joined[f"{name}_mean"]
-        spread = joined[f"{name}_std"].replace(0.0, np.nan)
-        joined[f"{name}_anomaly"] = deviation.astype("float32")
-        joined[f"{name}_z"] = (deviation / spread).astype("float32")
-
-    drop = ["month", *(f"{name}_{s}" for name in VALUE_NAMES for s in ("mean", "std", "count"))]
-    return joined.drop(columns=drop)
-
-
 def missingness_report(vegetation: pd.DataFrame) -> pd.DataFrame:
     """Coverage per month of the record"""
     report = vegetation.assign(

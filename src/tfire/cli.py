@@ -9,6 +9,7 @@ from typing import Annotated
 import typer
 
 from tfire.config import Config, load_config, setup_logging
+from tfire.datasets import build_dataset
 from tfire.features import EXTRACTORS
 from tfire.fires import build_positives
 from tfire.grid import build_grid
@@ -105,6 +106,12 @@ def extract_features_command(
     for name in names:
         logger.info("Extracting %s", name)
         EXTRACTORS[name](cfg, force)
+
+
+@app.command("build-dataset")
+def build_dataset_command(config: ConfigOption = None, force: ForceOption = False) -> None:
+    """Join the samples against every feature block into the training table."""
+    build_dataset(_start(config), force=force)
 
 
 @app.command("fetch-era5")

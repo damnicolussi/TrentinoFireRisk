@@ -77,7 +77,7 @@ def distance_frame(spec: GridSpec, active: npt.NDArray[np.int64], config: Config
 
 
 def poi_frame(spec: GridSpec, active: npt.NDArray[np.int64], config: Config) -> pd.DataFrame:
-    """Recreational POI density and accommodation bed capacity, per active cell."""
+    """Recreational and accommodation POI density, per active cell."""
     poi = osm.fetch_poi(config)
     cell_id = spec.points_to_cells(poi.geometry.x, poi.geometry.y)
     poi = poi.assign(cell_id=cell_id).loc[cell_id >= 0]
@@ -87,20 +87,21 @@ def poi_frame(spec: GridSpec, active: npt.NDArray[np.int64], config: Config) -> 
     )
     recreational_count = poi.loc[is_recreational].groupby("cell_id").size()
 
-    capacity = poi[list(osm.CAPACITY_TAG_PRIORITY)].bfill(axis=1).iloc[:, 0]
+    # huts and campsites belong to both sets and are counted in both features: they are a day
+    # destination and a place to sleep at once.
     is_accommodation = poi["tourism"].isin(osm.ACCOMMODATION_TOURISM_VALUES)
-    accommodation_capacity = (
-        capacity.where(is_accommodation).groupby(poi["cell_id"]).sum(min_count=1)
-    )
+    accommodation_count = poi.loc[is_accommodation].groupby("cell_id").size()
 
     frame = pd.DataFrame({"cell_id": active}).set_index("cell_id")
-    cell_km2 = (config.resolution_m / 1000) ** 2
+    cell_km2 = (spec.resolution_m / 1000) ** 2
     frame["recreational_poi_density"] = (
         recreational_count.reindex(frame.index, fill_value=0) / cell_km2
     )
-    frame["accommodation_capacity"] = accommodation_capacity.reindex(frame.index, fill_value=0.0)
+    frame["accommodation_density"] = (
+        accommodation_count.reindex(frame.index, fill_value=0) / cell_km2
+    )
     return frame.reset_index().astype(
-        {"recreational_poi_density": "float32", "accommodation_capacity": "float32"}
+        {"recreational_poi_density": "float32", "accommodation_density": "float32"}
     )
 
 
@@ -180,11 +181,10 @@ def validate_human(human: pd.DataFrame, population: pd.DataFrame, config: Config
         config.human.natura2000_threshold,
     )
 
-    zero_capacity = int((human["accommodation_capacity"] == 0).sum())
+    with_lodging = int((human["accommodation_density"] > 0).sum())
     logger.info(
-        "Accommodation: %d / %d cell(s) have zero capacity (OSM beds/capacity/rooms tagging "
-        "is incomplete; not imputed)",
-        zero_capacity,
+        "Accommodation: %d / %d cell(s) hold lodging",
+        with_lodging,
         len(human),
     )
 
