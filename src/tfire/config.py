@@ -78,6 +78,8 @@ class PathsConfig(BaseModel):
     worldpop_raster: Path
     human_out: Path
     human_population_out: Path
+    mesogeos_raw: Path
+    mesogeos_model_dir: Path
     dataset_out: Path
     quality_report_out: Path
 
@@ -274,6 +276,22 @@ class SamplingConfig(BaseModel):
     expected_positives: int = Field(gt=0)
 
 
+class MesogeosConfig(BaseModel):
+    model_config = _STRICT
+
+    track_length_days: int = Field(gt=0)
+    holdout_years: list[int] = Field(min_length=1)
+    max_depth: int = Field(gt=0)
+    n_estimators: int = Field(gt=0)
+    learning_rate: float = Field(gt=0, le=1)
+    early_stopping_rounds: int = Field(gt=0)
+
+    @property
+    def target_time_idx(self) -> int:
+        """Index of the day the label refers to, the last of the track."""
+        return self.track_length_days - 1
+
+
 class DatasetConfig(BaseModel):
     model_config = _STRICT
 
@@ -306,6 +324,7 @@ class Config(BaseModel):
     vegetation: VegetationConfig
     human: HumanConfig
     sampling: SamplingConfig
+    mesogeos: MesogeosConfig
     dataset: DatasetConfig
     logging: LoggingConfig
 

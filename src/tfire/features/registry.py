@@ -42,6 +42,7 @@ class FeatureSpec(BaseModel):
     temporal: Literal["static", "dynamic"] | None = None
     forecastable: bool | None = None
     nullable: bool = False
+    optional: bool = False
     min: float | str | None = None
     max: float | str | None = None
 
@@ -62,6 +63,10 @@ class Registry:
     @property
     def features(self) -> tuple[FeatureSpec, ...]:
         return tuple(spec for spec in self.specs if spec.role == "feature")
+
+    def present(self, frame: pd.DataFrame) -> tuple[FeatureSpec, ...]:
+        """The declared features the table actually carries, optional ones included."""
+        return tuple(spec for spec in self.features if spec.name in frame.columns)
 
 
 def _flatten(raw: dict[str, Any]) -> Iterator[FeatureSpec]:
@@ -103,8 +108,8 @@ def validate_frame(frame: pd.DataFrame, registry: Registry, config: Config) -> N
     for column in frame.columns:
         if column not in declared:
             problems.append(f"{column}: present in the table, absent from the registry")
-    for name in declared:
-        if name not in frame.columns:
+    for name, spec in declared.items():
+        if name not in frame.columns and not spec.optional:
             problems.append(f"{name}: declared in the registry, absent from the table")
 
     for name, spec in declared.items():
@@ -139,6 +144,6 @@ def validate_frame(frame: pd.DataFrame, registry: Registry, config: Config) -> N
 
     logger.info(
         "Registry check passed: %d column(s), %d of them features",
-        len(registry.specs),
-        len(registry.features),
+        len(frame.columns),
+        len(registry.present(frame)),
     )

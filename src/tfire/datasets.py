@@ -15,6 +15,7 @@ from tfire.features.human import calendar_features
 from tfire.features.landcover import nearest_edition
 from tfire.features.registry import Registry, load_registry, validate_frame
 from tfire.features.vegetation import preceding_composite
+from tfire.models.mesogeos import MODEL_FILENAME, PROB_COLUMN, predict_prob
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +98,27 @@ def attach_vegetation(samples: pd.DataFrame, config: Config) -> pd.DataFrame:
     return _join(samples, vegetation, ["cell_id", "veg_composite_date"])
 
 
+def attach_mesogeos_prob(samples: pd.DataFrame, config: Config) -> pd.DataFrame:
+    """Score the assembled rows with the stacking base model, if one has been trained."""
+    model_path = config.path(config.paths.mesogeos_model_dir) / MODEL_FILENAME
+    if not model_path.is_file():
+        logger.warning(
+            "No base model at %s, building without %s. Run `tfire train-mesogeos` first.",
+            model_path,
+            PROB_COLUMN,
+        )
+        return samples
+
+    samples[PROB_COLUMN] = predict_prob(samples, config)
+    logger.info(
+        "%s: mean %.4f on the negatives, %.4f on the positives",
+        PROB_COLUMN,
+        float(samples.loc[~samples["is_fire"], PROB_COLUMN].mean()),
+        float(samples.loc[samples["is_fire"], PROB_COLUMN].mean()),
+    )
+    return samples
+
+
 def assemble(config: Config) -> pd.DataFrame:
     samples = _read(config, config.paths.samples_out)
     logger.info("Spine: %d samples, %d positive", len(samples), int(samples["is_fire"].sum()))
@@ -121,7 +143,9 @@ def assemble(config: Config) -> pd.DataFrame:
     samples = samples.drop(columns="era5_id")
 
     calendar = calendar_features(pd.DatetimeIndex(samples["date"].unique()))
-    return _join(samples, calendar, ["date"])
+    samples = _join(samples, calendar, ["date"])
+
+    return attach_mesogeos_prob(samples, config)
 
 
 def decade_labels(years: pd.Series) -> pd.Series:
@@ -136,7 +160,7 @@ def decade_labels(years: pd.Series) -> pd.Series:
 
 def quality_report(frame: pd.DataFrame, registry: Registry, config: Config) -> dict[str, Any]:
     """Missingness per feature per decade, distributions, and the class balance."""
-    features = registry.features
+    features = registry.present(frame)
     decade = decade_labels(frame["date"].dt.year)
 
     balance = []
@@ -201,12 +225,12 @@ def validate_dataset(frame: pd.DataFrame, registry: Registry, config: Config) ->
 
     if len(frame) != config.dataset.expected_rows:
         logger.error("%d row(s), expected %d", len(frame), config.dataset.expected_rows)
-    if len(registry.features) != config.dataset.expected_features:
-        logger.error(
-            "%d feature(s), expected %d",
-            len(registry.features),
-            config.dataset.expected_features,
-        )
+
+    present = registry.present(frame)
+    optional = sum(spec.optional for spec in present)
+    expected = config.dataset.expected_features + optional
+    if len(present) != expected:
+        logger.error("%d feature(s), expected %d", len(present), expected)
 
     duplicates = int(frame.duplicated(["cell_id", "date"]).sum())
     if duplicates:
@@ -236,7 +260,7 @@ def build_dataset(config: Config, force: bool = False) -> pd.DataFrame:
     frame["worldpop_year"] = frame["worldpop_year"].astype("int16")
 
     validate_dataset(frame, registry, config)
-    frame = frame[[spec.name for spec in registry.specs]]
+    frame = frame[[spec.name for spec in registry.specs if spec.name in frame.columns]]
 
     report = quality_report(frame, registry, config)
     for row in report["balance_by_decade"]:

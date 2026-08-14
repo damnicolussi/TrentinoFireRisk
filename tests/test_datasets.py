@@ -39,7 +39,7 @@ def test_a_null_neighbor_makes_the_sample_null_rather_than_a_partial_sum() -> No
     """Summing over three of four weights yields a plausible number that is 10% too low."""
     result = interpolate_meteo(SAMPLES, WEIGHTS, backbone(10.0, 20.0, 30.0, np.nan))
 
-    assert np.isnan(result.loc[0, "temp_mean"])
+    assert result["temp_mean"].isna().iloc[0]
 
 
 def test_interpolation_refuses_weights_that_do_not_sum_to_one() -> None:
@@ -111,14 +111,14 @@ def registry() -> Registry:
 
 
 def test_an_undeclared_column_is_rejected(config: Config) -> None:
-    frame = pd.DataFrame({"ndvi": np.float32([0.5]), "surprise": [1.0]})
+    frame = pd.DataFrame({"ndvi": pd.Series([0.5], dtype="float32"), "surprise": [1.0]})
 
     with pytest.raises(ValueError, match="registry violation"):
         validate_frame(frame, registry(), config)
 
 
 def test_a_value_outside_its_declared_range_is_rejected(config: Config) -> None:
-    frame = pd.DataFrame({"ndvi": np.float32([1.4])})
+    frame = pd.DataFrame({"ndvi": pd.Series([1.4], dtype="float32")})
 
     with pytest.raises(ValueError, match="registry violation"):
         validate_frame(frame, registry(), config)

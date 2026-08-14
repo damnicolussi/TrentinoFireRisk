@@ -41,6 +41,8 @@ paths:
   worldpop_raster: "data/raw/worldpop/pop_density.tif"
   human_out: "data/interim/human.parquet"
   human_population_out: "data/interim/human_population.parquet"
+  mesogeos_raw: "data/raw/mesogeos"
+  mesogeos_model_dir: "models/mesogeos"
   dataset_out: "data/processed/trentino_dataset.parquet"
   quality_report_out: "data/processed/data_quality.json"
 
@@ -235,6 +237,19 @@ sampling:
   # 3,174 fires inside date_range, minus 5 whose cell center falls outside the
   # boundary, minus 14 that share a (cell_id, date) with a larger fire.
   expected_positives: 3155
+
+mesogeos:
+  # a track is 30 consecutive days at 1 km pixel; the last one is the day the fire started.
+  # every other row is lead-up, kept only for the cumulative precipitation windows.
+  track_length_days: 30
+
+  # last three years of the record, held out to measure the base model before it is refitted
+  holdout_years: [2020, 2021, 2022]
+
+  max_depth: 6
+  n_estimators: 400
+  learning_rate: 0.05
+  early_stopping_rounds: 30
 
 dataset:
   expected_rows: 34705

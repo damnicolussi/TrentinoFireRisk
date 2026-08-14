@@ -13,6 +13,7 @@ from tfire.datasets import build_dataset
 from tfire.features import EXTRACTORS
 from tfire.fires import build_positives
 from tfire.grid import build_grid
+from tfire.models.mesogeos import train_mesogeos
 from tfire.preflight import CHECKS, check_access
 from tfire.sampling import build_samples
 from tfire.sources.era5land import fetch_era5, fetch_years
@@ -106,6 +107,12 @@ def extract_features_command(
     for name in names:
         logger.info("Extracting %s", name)
         EXTRACTORS[name](cfg, force)
+
+
+@app.command("train-mesogeos")
+def train_mesogeos_command(config: ConfigOption = None, force: ForceOption = False) -> None:
+    """Train the stacking base model on the Mesogeos tracks."""
+    train_mesogeos(_start(config), force=force)
 
 
 @app.command("build-dataset")

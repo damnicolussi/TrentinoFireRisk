@@ -229,3 +229,14 @@ categories:
       dc: {min: 0.0, max: "config:fwi.max_dc"}
       isi: {min: 0.0, max: "config:fwi.max_isi"}
       bui: {min: 0.0, max: "config:fwi.max_bui"}
+
+  stacking:
+    # written by `tfire train-mesogeos`, which the assembly does not run itself, so the table
+    # is valid at 137 features before the base model exists and 138 after
+    source: "XGBoost on the Mesogeos Mediterranean tracks, scored on the Trentino values"
+    temporal: dynamic
+    forecastable: true
+    dtype: float32
+    optional: true
+    columns:
+      mesogeos_prob: {min: 0.0, max: 1.0}
