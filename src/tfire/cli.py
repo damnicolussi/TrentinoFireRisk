@@ -14,6 +14,7 @@ from tfire.features import EXTRACTORS
 from tfire.fires import build_positives
 from tfire.grid import build_grid
 from tfire.models.mesogeos import train_mesogeos
+from tfire.models.trentino import SPECS, train_trentino
 from tfire.preflight import CHECKS, check_access
 from tfire.sampling import build_samples
 from tfire.sources.era5land import fetch_era5, fetch_years
@@ -42,6 +43,10 @@ SourceOption = Annotated[
 CategoryOption = Annotated[
     list[str] | None,
     typer.Option("--category", help="Feature category to extract; repeatable. Defaults to all."),
+]
+ModelOption = Annotated[
+    list[str] | None,
+    typer.Option("--model", help="Model to train; repeatable. Defaults to all."),
 ]
 YearOption = Annotated[
     list[int] | None,
@@ -113,6 +118,23 @@ def extract_features_command(
 def train_mesogeos_command(config: ConfigOption = None, force: ForceOption = False) -> None:
     """Train the stacking base model on the Mesogeos tracks."""
     train_mesogeos(_start(config), force=force)
+
+
+@app.command("train")
+def train_command(
+    config: ConfigOption = None, model: ModelOption = None, force: ForceOption = False
+) -> None:
+    """Train the Trentino model and its baselines on the assembled table."""
+    names = None if not model else [name.lower() for name in model]
+    if names:
+        unknown = sorted(set(names) - set(SPECS))
+        if unknown:
+            raise typer.BadParameter(
+                f"Unknown model(s): {', '.join(unknown)}. Choose from {sorted(SPECS)}."
+            )
+        names = [name for name in SPECS if name in set(names)]
+
+    train_trentino(_start(config), force=force, selected=names)
 
 
 @app.command("build-dataset")

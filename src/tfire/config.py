@@ -7,6 +7,8 @@ instead of silently falling back to a default.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from datetime import date
 from pathlib import Path
@@ -80,6 +82,7 @@ class PathsConfig(BaseModel):
     human_population_out: Path
     mesogeos_raw: Path
     mesogeos_model_dir: Path
+    trentino_model_dir: Path
     dataset_out: Path
     quality_report_out: Path
 
@@ -292,6 +295,33 @@ class MesogeosConfig(BaseModel):
         return self.track_length_days - 1
 
 
+class RandomForestConfig(BaseModel):
+    model_config = _STRICT
+
+    n_estimators: int = Field(gt=0)
+    min_samples_leaf: int = Field(gt=0)
+
+
+class LogisticConfig(BaseModel):
+    model_config = _STRICT
+
+    max_iter: int = Field(gt=0)
+    c: float = Field(gt=0)
+
+
+class TrentinoConfig(BaseModel):
+    model_config = _STRICT
+
+    version: str
+    test_years_start: int
+    cv_folds: int = Field(gt=1)
+    optuna_trials: int = Field(gt=0)
+    early_stopping_rounds: int = Field(gt=0)
+    max_estimators: int = Field(gt=0)
+    random_forest: RandomForestConfig
+    logistic: LogisticConfig
+
+
 class DatasetConfig(BaseModel):
     model_config = _STRICT
 
@@ -325,6 +355,7 @@ class Config(BaseModel):
     human: HumanConfig
     sampling: SamplingConfig
     mesogeos: MesogeosConfig
+    trentino: TrentinoConfig
     dataset: DatasetConfig
     logging: LoggingConfig
 
@@ -333,6 +364,12 @@ class Config(BaseModel):
     def path(self, relative: Path) -> Path:
         """Resolve a config-declared path against the project root."""
         return relative if relative.is_absolute() else self.project_root / relative
+
+    def digest(self) -> str:
+        """sha256 of the settings, for stamping an artifact with the run that produced it."""
+        payload = self.model_dump(mode="json", exclude={"project_root"})
+        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def load_config(path: Path | None = None) -> Config:

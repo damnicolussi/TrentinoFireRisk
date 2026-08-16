@@ -12,6 +12,7 @@ import numpy.typing as npt
 import pandas as pd
 
 from tfire.config import Config
+from tfire.evaluation import scores
 from tfire.sources.dem import N_ASPECT_CLASSES, aspect_sectors
 
 if TYPE_CHECKING:
@@ -273,17 +274,6 @@ def _classifier(config: Config, n_estimators: int, early_stopping: int | None) -
     )
 
 
-def _scores(labels: npt.NDArray[Any], probabilities: npt.NDArray[Any]) -> dict[str, float]:
-    from sklearn.metrics import average_precision_score, brier_score_loss, roc_auc_score
-
-    return {
-        "auprc": float(average_precision_score(labels, probabilities)),
-        "auroc": float(roc_auc_score(labels, probabilities)),
-        "brier": float(brier_score_loss(labels, probabilities)),
-        "positive_rate": float(labels.mean()),
-    }
-
-
 def train_mesogeos(config: Config, force: bool = False) -> dict[str, Any]:
     """Fit the base model on the Mesogeos tracks and persist it under `models/mesogeos/`."""
     directory = config.path(config.paths.mesogeos_model_dir)
@@ -314,13 +304,13 @@ def train_mesogeos(config: Config, force: bool = False) -> dict[str, Any]:
         verbose=False,
     )
     rounds = int(tuned.best_iteration) + 1
-    scores = _scores(test["label"].to_numpy(), tuned.predict_proba(test[features])[:, 1])
+    measured = scores(test["label"].to_numpy(), tuned.predict_proba(test[features])[:, 1])
     logger.info(
         "Holdout %s: AUPRC %.3f, AUROC %.3f against a %.1f%% base rate, %d rounds",
         config.mesogeos.holdout_years,
-        scores["auprc"],
-        scores["auroc"],
-        100 * scores["positive_rate"],
+        measured["auprc"],
+        measured["auroc"],
+        100 * measured["positive_rate"],
         rounds,
     )
 
@@ -333,7 +323,7 @@ def train_mesogeos(config: Config, force: bool = False) -> dict[str, Any]:
 
     metrics = {
         "holdout_years": config.mesogeos.holdout_years,
-        "holdout": scores,
+        "holdout": measured,
         "rounds": rounds,
         "rows": {"train": len(train), "holdout": len(test), "final_fit": len(frame)},
         "positives": {"train": int(train["label"].sum()), "final_fit": positives},

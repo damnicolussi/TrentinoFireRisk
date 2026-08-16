@@ -43,6 +43,7 @@ paths:
   human_population_out: "data/interim/human_population.parquet"
   mesogeos_raw: "data/raw/mesogeos"
   mesogeos_model_dir: "models/mesogeos"
+  trentino_model_dir: "models/trentino"
   dataset_out: "data/processed/trentino_dataset.parquet"
   quality_report_out: "data/processed/data_quality.json"
 
@@ -250,6 +251,26 @@ mesogeos:
   n_estimators: 400
   learning_rate: 0.05
   early_stopping_rounds: 30
+
+trentino:
+  # artifacts land in models/trentino/<version>/.
+  version: "v1"
+
+  test_years_start: 2015
+
+  cv_folds: 5
+
+  optuna_trials: 100
+  early_stopping_rounds: 50
+  max_estimators: 2000
+
+  random_forest:
+    n_estimators: 500
+    min_samples_leaf: 5
+
+  logistic:
+    max_iter: 2000
+    c: 1.0
 
 dataset:
   expected_rows: 34705
