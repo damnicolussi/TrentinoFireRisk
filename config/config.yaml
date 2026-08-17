@@ -47,6 +47,9 @@ paths:
   dataset_out: "data/processed/trentino_dataset.parquet"
   quality_report_out: "data/processed/data_quality.json"
   sensitivity_dir: "data/interim/sensitivity"
+  forecast_cache: "data/raw/forecast"
+  operational_dir: "data/interim/operational"
+  risk_dir: "data/processed/risk"
   report_dir: "reports"
   figures_dir: "reports/figures"
 
@@ -299,6 +302,45 @@ evaluation:
 dataset:
   expected_rows: 34705
   expected_features: 137
+
+forecast:
+  archive_url: "https://archive-api.open-meteo.com/v1/archive"
+  forecast_url: "https://api.open-meteo.com/v1/forecast"
+
+  # `era5_land` on its own carries only temperature and dewpoint. `era5_seamless` serves those
+  # two from ERA5-Land at 0.1 degrees, on the backbone's own lattice, and takes pressure,
+  # precipitation and wind from ERA5 at 0.25 degrees.
+  archive_model: "era5_seamless"
+  forecast_model: "ecmwf_ifs025"
+
+  # the same six fields the backbone carries. relative humidity and wind speed are derived
+  # from these hour by hour, not requested ready-made.
+  variables:
+    - "temperature_2m"
+    - "dew_point_2m"
+    - "surface_pressure"
+    - "precipitation"
+    - "wind_speed_10m"
+    - "wind_direction_10m"
+
+  horizon_days: 10
+
+  # the archive ran 6 days behind and the forecast endpoint's own past reached 63 days back.
+  # both carry a margin.
+  forecast_past_days: 60
+  archive_latency_days: 7
+
+  # history fetched before the first predicted day. DC has the longest memory of the FWI
+  # codes, and 30 of these days are what precip_cum30 needs on its own. Spin-up comes from
+  # the archive whenever it reaches, so this is not bounded by forecast_past_days.
+  spinup_days: 90
+
+  # lattice points per request. 187 in one URL is within the length the API accepts, but
+  # splitting keeps a single failure from costing the whole province.
+  batch_size: 64
+
+  request_timeout_s: 120
+  retry_attempts: 3
 
 logging:
   level: "INFO"

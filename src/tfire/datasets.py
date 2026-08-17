@@ -46,33 +46,38 @@ def nearest_backbone(weights: pd.DataFrame) -> pd.DataFrame:
 
 
 def interpolate_meteo(
-    samples: pd.DataFrame, weights: pd.DataFrame, meteo: pd.DataFrame
+    samples: pd.DataFrame, weights: pd.DataFrame, meteo: pd.DataFrame, key: str = "sample_id"
 ) -> pd.DataFrame:
     """Bilinear interpolation of the daily aggregates from the backbone onto the sample cells.
 
     Only the linear aggregates go through this. The FWI sub-indices are accumulators carrying
     months of drying history, so a spatial average of them is not the index of any real point.
+    `key` is whatever identifies one row of `samples`: a sample id when the table is sampled,
+    the cell id when a single day is scored over the whole grid.
     """
     columns = [name for name in meteo.columns if name not in ("era5_id", "date")]
 
-    pairs = samples[["sample_id", "cell_id", "date"]].merge(weights, on="cell_id", how="left")
+    # `key` is `cell_id` itself when a whole day is scored, and selecting it twice would give
+    # the merge two columns of the same name
+    identifiers = list(dict.fromkeys([key, "cell_id", "date"]))
+    pairs = samples[identifiers].merge(weights, on="cell_id", how="left")
     pairs = pairs.merge(meteo, on=["era5_id", "date"], how="left", validate="m:1")
 
-    mass = pairs.groupby("sample_id")["weight"].sum()
+    mass = pairs.groupby(key)["weight"].sum()
     drift = float((mass - 1.0).abs().max())
     if drift > 1e-6:
-        raise ValueError(f"Interpolation weights do not sum to 1 per sample, off by {drift:.3g}")
+        raise ValueError(f"Interpolation weights do not sum to 1 per {key}, off by {drift:.3g}")
 
     values = pairs[columns].to_numpy("float64")
     weighted = pd.DataFrame(values * pairs["weight"].to_numpy()[:, None], columns=columns)
-    weighted["sample_id"] = pairs["sample_id"].to_numpy()
-    totals = weighted.groupby("sample_id", sort=False).sum()
+    weighted[key] = pairs[key].to_numpy()
+    totals = weighted.groupby(key, sort=False).sum()
 
     # a null in any of the four neighbors makes the weighted sum a partial one, which pandas
     # would hand back as a plausible number
-    incomplete = pairs.loc[np.isnan(values).any(axis=1), "sample_id"].unique()
+    incomplete = pairs.loc[np.isnan(values).any(axis=1), key].unique()
     if incomplete.size:
-        logger.error("%d sample(s) have an incomplete backbone neighborhood", incomplete.size)
+        logger.error("%d row(s) have an incomplete backbone neighborhood", incomplete.size)
         totals.loc[totals.index.isin(incomplete), :] = np.nan
 
     return totals.astype("float32").reset_index()

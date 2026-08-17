@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Annotated
 
@@ -11,8 +12,10 @@ import typer
 from tfire.config import Config, load_config, setup_logging
 from tfire.datasets import build_dataset
 from tfire.features import EXTRACTORS
+from tfire.features.vegetation import refresh_landsat
 from tfire.fires import build_positives
 from tfire.grid import build_grid
+from tfire.inference import FeatureUnavailableError, predict_days
 from tfire.models.evaluate import evaluate_trentino
 from tfire.models.mesogeos import train_mesogeos
 from tfire.models.trentino import SPECS, train_trentino
@@ -60,6 +63,21 @@ VariantOption = Annotated[
 YearOption = Annotated[
     list[int] | None,
     typer.Option("--year", help="Year to download; repeatable. Defaults to the whole record."),
+]
+DateOption = Annotated[
+    datetime | None,
+    typer.Option("--date", formats=["%Y-%m-%d"], help="Date to predict. Defaults to today."),
+]
+DaysOption = Annotated[
+    int,
+    typer.Option("--days", min=1, help="Consecutive days to predict, starting at --date."),
+]
+RefreshOption = Annotated[
+    bool,
+    typer.Option(
+        "--refresh-vegetation",
+        help="Download any Landsat composite the requested dates need but the cache lacks.",
+    ),
 ]
 
 
@@ -203,6 +221,28 @@ def fetch_landsat_command(
         )
 
     fetch_landsat(cfg, years, force=force)
+
+
+@app.command("predict")
+def predict_command(
+    config: ConfigOption = None,
+    day: DateOption = None,
+    days: DaysOption = 1,
+    refresh_vegetation: RefreshOption = False,
+    force: ForceOption = False,
+) -> None:
+    """Write the risk map for a date, and optionally for the days after it."""
+    cfg = _start(config)
+    start = day.date() if day else date.today()
+
+    if refresh_vegetation:
+        refresh_landsat(cfg, start + timedelta(days=days - 1))
+
+    try:
+        predict_days(cfg, start, days=days, force=force)
+    except FeatureUnavailableError as error:
+        logger.error("%s", error)
+        raise typer.Exit(code=1) from error
 
 
 @app.command("check-access")

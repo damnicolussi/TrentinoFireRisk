@@ -9,10 +9,11 @@ import xarray as xr
 from tfire.config import Config
 from tfire.features.meteo import (
     HOURS_PER_DAY,
+    aggregate_daily,
     bilinear_weights,
     circular_mean,
-    daily_arrays,
     deaccumulate,
+    era5_hourly,
     relative_humidity,
     trailing_sum,
     wind_speed_direction,
@@ -68,7 +69,7 @@ def test_local_day_windowing_follows_the_utc_offset(config: Config) -> None:
 
     # temperature equals the index, so every aggregate names the hour it came from
     dataset = hourly(72, t2m=273.15 + np.arange(72))
-    dates, columns = daily_arrays(dataset, config)
+    dates, columns = aggregate_daily(era5_hourly(dataset), config)
 
     # UTC 23:00 is the first hour of the next local day, so 2003-01-01 is never complete
     assert list(dates.astype(str)) == ["2003-01-02", "2003-01-03"]
@@ -86,7 +87,7 @@ def test_noon_rain_window_covers_the_24_hours_ending_at_noon(config: Config) -> 
     accumulated[::HOURS_PER_DAY] = HOURS_PER_DAY
     dataset = hourly(96, tp=accumulated / 1000.0)
 
-    _, columns = daily_arrays(dataset, config)
+    _, columns = aggregate_daily(era5_hourly(dataset), config)
 
     assert np.isnan(columns["precip_noon24"][0, 0])
     assert columns["precip_noon24"][1, 0] == pytest.approx(HOURS_PER_DAY, abs=1e-6)
@@ -142,7 +143,7 @@ def test_wind_direction_at_max_comes_from_the_windiest_hour(config: Config) -> N
     u[33], v[33] = 0.0, -20.0
     dataset = hourly(48, u10=u, v10=v)
 
-    _, columns = daily_arrays(dataset, config)
+    _, columns = aggregate_daily(era5_hourly(dataset), config)
 
     assert columns["wind_speed_max"][0, 0] == pytest.approx(20.0)
     assert columns["wind_dir_at_max"][0, 0] == pytest.approx(0.0)
@@ -154,7 +155,7 @@ def test_humidity_is_derived_hourly_then_averaged(config: Config) -> None:
     swing = 15.0 + 15.0 * np.sin(np.arange(48) * 2 * np.pi / HOURS_PER_DAY)
     dataset = hourly(48, t2m=273.15 + swing, d2m=273.15 + 5.0)
 
-    _, columns = daily_arrays(dataset, config)
+    _, columns = aggregate_daily(era5_hourly(dataset), config)
 
     hours = swing[23:47]
     hourly_first = relative_humidity(hours, np.full(hours.size, 5.0)).mean()
@@ -169,7 +170,7 @@ def test_wind_speed_is_derived_hourly_then_averaged(config: Config) -> None:
     u = np.where(np.arange(48) % HOURS_PER_DAY < 12, 5.0, -5.0)
     dataset = hourly(48, u10=u)
 
-    _, columns = daily_arrays(dataset, config)
+    _, columns = aggregate_daily(era5_hourly(dataset), config)
 
     assert columns["wind_speed_mean"][0, 0] == pytest.approx(5.0)
     assert abs(np.hypot(u[23:47].mean(), 0.0)) < 1.0

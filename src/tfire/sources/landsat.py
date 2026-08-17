@@ -478,6 +478,50 @@ def fetch_landsat(config: Config, years: list[int], force: bool = False) -> list
     return targets
 
 
+def chunk_of(config: Config, month: date) -> date:
+    """The chunk a month belongs to, on the same lattice `chunk_starts` walks."""
+    size = config.vegetation.chunk_months
+    return date(month.year, ((month.month - 1) // size) * size + 1, 1)
+
+
+def fetch_months(config: Config, months: list[date], force: bool = False) -> list[Path]:
+    """Download whole chunks around the requested months, skipping what is already cached."""
+    import ee
+
+    from tfire.grid import load_grid
+
+    cached = set(cached_months(config))
+    wanted = sorted({chunk_of(config, month) for month in months})
+    queue = [
+        chunk
+        for chunk in wanted
+        if force or not {month for month in _chunk_span(config, chunk)} <= cached
+    ]
+    if not queue:
+        logger.info("Every month requested is already cached")
+        return [chunk_cache_path(config, chunk) for chunk in wanted]
+
+    spec, _ = load_grid(config)
+    ee.Initialize(project=config.sources.gee_project)
+
+    written = []
+    for chunk in queue:
+        pending = [month for month in _chunk_span(config, chunk) if force or month not in cached]
+        logger.info("Fetching %s: %d month(s)", f"{chunk:%Y-%m}", len(pending))
+        written.append(_fetch_window(config, spec, pending))
+    return written
+
+
+def _chunk_span(config: Config, chunk: date) -> list[date]:
+    """The months of one chunk, unclipped: `chunk_months` stops at the configured record."""
+    size = config.vegetation.chunk_months
+    months = []
+    for offset in range(size):
+        step = chunk.month + offset
+        months.append(date(chunk.year + (step - 1) // 12, (step - 1) % 12 + 1, 1))
+    return months
+
+
 def _fetch_window(config: Config, spec: GridSpec, months: list[date]) -> Path:
     """Download one request's worth of months into a raster named for its first month.
 

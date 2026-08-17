@@ -39,7 +39,7 @@ def test_malformed_bbox_is_rejected(kwargs: dict[str, float]) -> None:
 
 
 def test_every_source_is_registered() -> None:
-    assert set(CHECKS) == {"era5", "gee", "landsat", "osm", "worldpop"}
+    assert set(CHECKS) == {"era5", "forecast", "gee", "landsat", "osm", "worldpop"}
 
 
 def test_failed_check_is_reported_not_raised(

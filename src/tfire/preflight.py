@@ -6,6 +6,8 @@ import logging
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
+import numpy as np
+
 from tfire.config import Config
 
 logger = logging.getLogger(__name__)
@@ -24,6 +26,10 @@ _MODIS_WINDOW = ("2020-07-01", "2020-07-31")
 _PLAUSIBLE_NDVI = (0.3, 0.95)
 
 _OSM_PROBE_BBOX = (11.115, 46.065, 11.130, 46.080)  # ~1 km around Trento railway station
+
+# a backbone lattice point over the province, and what a day there can plausibly average
+_FORECAST_PROBE = (11.1, 46.1)
+_PLAUSIBLE_PROBE_TEMP_C = (-30.0, 40.0)
 _WORLDPOP_SCALE_M = 100
 _PLAUSIBLE_POP_DENSITY = (10.0, 1000.0)  # province average; mountainous and sparse
 
@@ -240,8 +246,50 @@ def check_worldpop(config: Config) -> AccessCheck:
     return AccessCheck("WorldPop", ok=True, detail=f"{year}: {density:.1f}/km2 over the bbox")
 
 
+def check_forecast(config: Config) -> AccessCheck:
+    """Ask both Open-Meteo endpoints for one lattice point, and check they still reach."""
+    from datetime import date, timedelta
+
+    from tfire.features.meteo import HOURLY_FIELDS
+    from tfire.sources.era5land import Lattice
+    from tfire.sources.forecast import PROVIDERS, fetch_hourly, window
+
+    today = date.today()
+    probe = Lattice(
+        latitudes=np.array([_FORECAST_PROBE[1]]), longitudes=np.array([_FORECAST_PROBE[0]])
+    )
+
+    reached: list[str] = []
+    for provider in PROVIDERS:
+        first, last = window(config, provider, today)
+        start = max(first, last - timedelta(days=1))
+        try:
+            fields = fetch_hourly(config, probe, start, last, provider, today)
+        except Exception as error:  # noqa: BLE001  any failure here is a failed check
+            return AccessCheck("Open-Meteo", ok=False, detail=f"{provider}: {error}")
+
+        empty = [name for name in HOURLY_FIELDS if np.isnan(getattr(fields, name)).all()]
+        if empty:
+            return AccessCheck(
+                "Open-Meteo",
+                ok=False,
+                detail=f"{provider} carries no {', '.join(empty)} at the edge of its window",
+            )
+
+        temperature = float(np.nanmean(fields.temp_c))
+        low, high = _PLAUSIBLE_PROBE_TEMP_C
+        if not low < temperature < high:
+            return AccessCheck(
+                "Open-Meteo", ok=False, detail=f"{provider}: implausible {temperature:.1f} C"
+            )
+        reached.append(f"{provider} reaches {last}")
+
+    return AccessCheck("Open-Meteo", ok=True, detail=", ".join(reached))
+
+
 CHECKS: dict[str, Callable[[Config], AccessCheck]] = {
     "era5": check_era5,
+    "forecast": check_forecast,
     "gee": check_gee,
     "landsat": check_landsat,
     "osm": check_osm,

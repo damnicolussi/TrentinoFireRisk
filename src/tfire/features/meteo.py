@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
 import numpy as np
@@ -44,6 +45,15 @@ _MAGNUS_B: Final = 243.04
 _OVERLAP_HOURS: Final = 48
 
 _AGGREGATED: Final = ("temp", "rh", "pres")
+
+HOURLY_FIELDS: Final = (
+    "temp_c",
+    "dewpoint_c",
+    "pres_hpa",
+    "precip_mm",
+    "wind_speed",
+    "wind_dir",
+)
 
 NOON_COLUMNS: Final = ("temp_noon", "rh_noon", "wind_speed_noon", "precip_noon24")
 
@@ -126,38 +136,47 @@ def _noon_accumulation(hourly: npt.NDArray[np.float64], n_days: int) -> npt.NDAr
     return total
 
 
-def daily_arrays(
-    dataset: xr.Dataset, config: Config
+@dataclass(frozen=True)
+class HourlyFields:
+    """One hourly span in the units the daily aggregation works in, shaped `(n_hours, n_cells)`."""
+
+    times: npt.NDArray[Any]
+    temp_c: npt.NDArray[np.float64]
+    dewpoint_c: npt.NDArray[np.float64]
+    pres_hpa: npt.NDArray[np.float64]
+    precip_mm: npt.NDArray[np.float64]
+    wind_speed: npt.NDArray[np.float64]
+    wind_dir: npt.NDArray[np.float64]
+
+    def __post_init__(self) -> None:
+        shapes = {name: getattr(self, name).shape for name in HOURLY_FIELDS}
+        if len(set(shapes.values())) != 1:
+            raise ValueError(f"Hourly fields disagree on shape: {shapes}")
+        if self.times.shape[0] != self.temp_c.shape[0]:
+            raise ValueError(
+                f"{self.times.shape[0]} timestamps for {self.temp_c.shape[0]} hourly rows"
+            )
+
+
+def aggregate_daily(
+    fields: HourlyFields, config: Config
 ) -> tuple[npt.NDArray[Any], dict[str, npt.NDArray[np.float64]]]:
     """Aggregate one hourly span into `(n_days, n_cells)` arrays, one per feature."""
-    times = dataset["time"].to_numpy().astype("datetime64[h]")
-    utc_hour = times.astype("int64") % HOURS_PER_DAY
-
-    temp_c = dataset["t2m"].to_numpy() - _KELVIN_OFFSET
-    humidity = relative_humidity(temp_c, dataset["d2m"].to_numpy() - _KELVIN_OFFSET)
-    pressure = dataset["sp"].to_numpy() * _PA_TO_HPA
-    precip = deaccumulate(dataset["tp"].to_numpy() * _M_TO_MM, utc_hour)
-    speed, direction = wind_speed_direction(dataset["u10"].to_numpy(), dataset["v10"].to_numpy())
-
-    # the opening stamp carries an accumulation that began before the series unless it is 01 UTC
-    usable = 0 if utc_hour[0] == 1 else 1
-    local = times[usable:] + np.timedelta64(config.meteo.utc_offset_hours, "h")
+    local = fields.times + np.timedelta64(config.meteo.utc_offset_hours, "h")
     start, stop = _whole_days(local.astype("int64") % HOURS_PER_DAY)
-
     n_days = (stop - start) // HOURS_PER_DAY
 
     def block(values: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
-        trimmed = values[usable:][start:stop]
-        return trimmed.reshape(n_days, HOURS_PER_DAY, -1)
+        return values[start:stop].reshape(n_days, HOURS_PER_DAY, -1)
 
     blocks = {
-        "temp": block(temp_c),
-        "rh": block(humidity),
-        "pres": block(pressure),
+        "temp": block(fields.temp_c),
+        "rh": block(relative_humidity(fields.temp_c, fields.dewpoint_c)),
+        "pres": block(fields.pres_hpa),
     }
-    precip_block = block(precip)
-    speed_block = block(speed)
-    direction_block = block(direction)
+    precip_block = block(fields.precip_mm)
+    speed_block = block(fields.wind_speed)
+    direction_block = block(fields.wind_dir)
 
     columns: dict[str, npt.NDArray[np.float64]] = {}
     for name in _AGGREGATED:
@@ -180,10 +199,30 @@ def daily_arrays(
     columns["temp_noon"] = blocks["temp"][:, NOON_HOUR_LST]
     columns["rh_noon"] = blocks["rh"][:, NOON_HOUR_LST]
     columns["wind_speed_noon"] = speed_block[:, NOON_HOUR_LST]
-    columns["precip_noon24"] = _noon_accumulation(precip[usable:][start:stop], n_days)
+    columns["precip_noon24"] = _noon_accumulation(fields.precip_mm[start:stop], n_days)
 
     dates = local[start:stop:HOURS_PER_DAY].astype("datetime64[D]")
     return dates, columns
+
+
+def era5_hourly(dataset: xr.Dataset) -> HourlyFields:
+    """ERA5-Land's stored fields in the units `aggregate_daily` works in."""
+    times = dataset["time"].to_numpy().astype("datetime64[h]")
+    utc_hour = times.astype("int64") % HOURS_PER_DAY
+
+    speed, direction = wind_speed_direction(dataset["u10"].to_numpy(), dataset["v10"].to_numpy())
+
+    # the opening stamp carries an accumulation that began before the series unless it is 01 UTC
+    usable = 0 if utc_hour[0] == 1 else 1
+    return HourlyFields(
+        times=times[usable:],
+        temp_c=dataset["t2m"].to_numpy()[usable:] - _KELVIN_OFFSET,
+        dewpoint_c=dataset["d2m"].to_numpy()[usable:] - _KELVIN_OFFSET,
+        pres_hpa=dataset["sp"].to_numpy()[usable:] * _PA_TO_HPA,
+        precip_mm=deaccumulate(dataset["tp"].to_numpy() * _M_TO_MM, utc_hour)[usable:],
+        wind_speed=speed[usable:],
+        wind_dir=direction[usable:],
+    )
 
 
 def hourly_span(config: Config, year: int) -> xr.Dataset:
@@ -248,7 +287,7 @@ def build_backbone(
         elif year_lattice != lattice:
             raise ValueError(f"{year} came back on a different lattice than {years[0]}")
 
-        dates, columns = daily_arrays(dataset, config)
+        dates, columns = aggregate_daily(era5_hourly(dataset), config)
         keep = dates.astype("datetime64[Y]").astype(int) + 1970 == year
         per_year.append((dates[keep], {name: values[keep] for name, values in columns.items()}))
         logger.info("%d: %d day(s) aggregated", year, int(keep.sum()))

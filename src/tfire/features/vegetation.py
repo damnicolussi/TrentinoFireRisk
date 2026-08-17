@@ -7,7 +7,7 @@ that maps open water.
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, timedelta
 from typing import TYPE_CHECKING, Final
 
 import numpy as np
@@ -131,6 +131,106 @@ def build_vegetation_frame(config: Config) -> pd.DataFrame:
     frame["valid_fraction"] = bands["valid_fraction"].reshape(-1)
     frame["snow_fraction"] = bands["snow_fraction"].reshape(-1)
     frame["age_days"] = age.reshape(-1)
+    return frame
+
+
+def months_in_reach(config: Config, composite: date) -> list[date]:
+    """The composite months that can still supply a value for `composite`."""
+    return month_starts(composite - timedelta(days=config.vegetation.max_fill_days), composite)
+
+
+def refresh_landsat(config: Config, day: date) -> list[Path]:
+    """Fetch whatever composite a date needs and the cache does not hold."""
+    from tfire.sources.landsat import fetch_months
+
+    composite = preceding_month(day)
+    wanted = months_in_reach(config, composite)
+    missing = [month for month in wanted if month not in cached_months(config)]
+    if not missing:
+        logger.info("Every composite %s needs is already cached", day)
+        return []
+
+    logger.info(
+        "%s needs %d month(s) not cached, %s to %s",
+        day,
+        len(missing),
+        f"{missing[0]:%Y-%m}",
+        f"{missing[-1]:%Y-%m}",
+    )
+    return fetch_months(config, missing)
+
+
+def preceding_month(day: date) -> date:
+    """The month before the one `day` falls in, which is the composite it may attach to."""
+    first = date(day.year, day.month, 1)
+    return date((first - timedelta(days=1)).year, (first - timedelta(days=1)).month, 1)
+
+
+def _empty_vegetation(active: npt.NDArray[np.int64]) -> pd.DataFrame:
+    frame = pd.DataFrame({"cell_id": active.astype("int32")})
+    for name in FEATURE_NAMES:
+        frame[name] = np.full(len(active), np.nan, dtype="float32")
+    return frame
+
+
+def operational_window(config: Config, composite: date) -> pd.DataFrame:
+    """The vegetation block for one composite month, built from the trailing cached months.
+
+    Carrying a value forward only ever reaches back `max_fill_days`, so the months inside that
+    reach are the whole history this needs; nothing before them can change the answer. That is
+    what lets a single date be served without rebuilding the 41-year table.
+    """
+    spec, grid = load_grid(config)
+    reach = config.vegetation.max_fill_days
+    wanted = months_in_reach(config, composite)
+
+    cached = cached_months(config)
+    available = [month for month in wanted if month in cached]
+    active = grid.loc[grid["is_trentino"], "cell_id"].to_numpy()
+
+    if not available:
+        logger.warning(
+            "No Landsat composite cached within %d days of %s, so the vegetation block is "
+            "empty for it. Run `tfire predict --refresh-vegetation` to fetch it.",
+            reach,
+            f"{composite:%Y-%m}",
+        )
+        return _empty_vegetation(active)
+
+    paths = sorted({cached[month] for month in available})
+    months, bands = _months_and_bands(paths, spec, active)
+
+    # a chunk holds three months, so reading one drags in months outside the reach
+    keep = [index for index, month in enumerate(months) if month in set(wanted)]
+    months = [months[index] for index in keep]
+    bands = {name: values[keep] for name, values in bands.items()}
+
+    values = apply_plausibility({name: bands[name] for name in VALUE_NAMES}, config)
+    observed = bands["valid_fraction"] >= config.vegetation.min_valid_fraction
+    values, age = forward_fill(values, observed, months, reach)
+
+    if months[-1] != composite:
+        logger.warning(
+            "No composite for %s; the newest inside reach is %s",
+            f"{composite:%Y-%m}",
+            f"{months[-1]:%Y-%m}",
+        )
+
+    frame = pd.DataFrame({"cell_id": active.astype("int32")})
+    for name in VALUE_NAMES:
+        frame[name] = values[name][-1]
+    frame["valid_fraction"] = bands["valid_fraction"][-1]
+    frame["snow_fraction"] = bands["snow_fraction"][-1]
+    frame["age_days"] = age[-1]
+
+    usable = float(frame["ndvi"].notna().mean())
+    logger.info(
+        "Vegetation for %s: %d month(s) in reach, %.1f%% of cells carry an ndvi, mean age %.0f d",
+        f"{composite:%Y-%m}",
+        len(months),
+        100 * usable,
+        float(np.nanmean(frame["age_days"])) if usable else float("nan"),
+    )
     return frame
 
 

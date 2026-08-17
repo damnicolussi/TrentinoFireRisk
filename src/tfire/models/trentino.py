@@ -29,6 +29,9 @@ METRICS_FILENAME: Final = "metrics.json"
 
 FWI_COLUMN: Final = "fwi"
 
+# the one categorical feature, and so the one whose indicators a single-day matrix can lack
+_CATEGORICAL_PREFIX: Final = "season"
+
 # Search bounds for the XGBoost hyperparameters.
 SEARCH_SPACE: Final[dict[str, tuple[float, float]]] = {
     "max_depth": (3, 10),
@@ -136,6 +139,28 @@ def design_matrix(
     years = frame["date"].dt.year
     logger.info("Design matrix: %d rows x %d columns", len(features), features.shape[1])
     return features, labels, years
+
+
+def align_columns(features: pd.DataFrame, columns: Sequence[str]) -> pd.DataFrame:
+    """Put a design matrix into the exact column set and order a stored model expects.
+
+    A single day carries one season, so the categorical expands to one indicator instead of
+    four. The absent indicators are genuinely zero and are filled; anything else missing is a
+    broken assembly and raises rather than being scored as a silent zero.
+    """
+    missing = [name for name in columns if name not in features.columns]
+    invented = [name for name in missing if not name.startswith(f"{_CATEGORICAL_PREFIX}_")]
+    if invented:
+        raise ValueError(f"The design matrix is missing {len(invented)} column(s): {invented}")
+
+    extra = [name for name in features.columns if name not in set(columns)]
+    if extra:
+        raise ValueError(f"The design matrix carries {len(extra)} undeclared column(s): {extra}")
+
+    aligned = features.reindex(columns=list(columns))
+    if missing:
+        aligned[missing] = 0.0
+    return aligned.astype("float32")
 
 
 def training_mask(years: pd.Series, config: Config) -> npt.NDArray[np.bool_]:

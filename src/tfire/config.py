@@ -86,6 +86,9 @@ class PathsConfig(BaseModel):
     dataset_out: Path
     quality_report_out: Path
     sensitivity_dir: Path
+    forecast_cache: Path
+    operational_dir: Path
+    risk_dir: Path
     report_dir: Path
     figures_dir: Path
 
@@ -353,6 +356,34 @@ class DatasetConfig(BaseModel):
     expected_features: int = Field(gt=0)
 
 
+class ForecastConfig(BaseModel):
+    model_config = _STRICT
+
+    archive_url: str
+    forecast_url: str
+    archive_model: str
+    forecast_model: str
+    variables: list[str] = Field(min_length=1)
+    horizon_days: int = Field(gt=0)
+    forecast_past_days: int = Field(gt=0)
+    archive_latency_days: int = Field(ge=0)
+    spinup_days: int = Field(gt=0)
+    batch_size: int = Field(gt=0)
+    request_timeout_s: int = Field(gt=0)
+    retry_attempts: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def check_windows(self) -> ForecastConfig:
+        """The two remote windows must overlap, or a date between them has no provider."""
+        if self.forecast_past_days <= self.archive_latency_days:
+            raise ValueError(
+                f"forecast_past_days ({self.forecast_past_days}) must exceed "
+                f"archive_latency_days ({self.archive_latency_days}), otherwise dates between "
+                "the archive and the forecast are served by neither"
+            )
+        return self
+
+
 class LoggingConfig(BaseModel):
     model_config = _STRICT
 
@@ -382,6 +413,7 @@ class Config(BaseModel):
     trentino: TrentinoConfig
     evaluation: EvaluationConfig
     dataset: DatasetConfig
+    forecast: ForecastConfig
     logging: LoggingConfig
 
     project_root: Path

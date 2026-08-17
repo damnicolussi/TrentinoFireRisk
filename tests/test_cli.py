@@ -19,6 +19,7 @@ def test_every_command_is_registered() -> None:
         "extract-features",
         "fetch-era5",
         "fetch-landsat",
+        "predict",
         "check-access",
     ):
         assert command in listed, f"{command} is missing from the command list"

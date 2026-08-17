@@ -16,6 +16,8 @@ if TYPE_CHECKING:
 
     from tfire.grid import GridSpec
 
+__all__ = ["aligned_window", "grid_transform", "read_cell_bands", "write_cell_bands"]
+
 logger = logging.getLogger(__name__)
 
 # how close an offset in pixels has to be to a whole number to count as aligned
@@ -70,6 +72,49 @@ def aligned_window(spec: GridSpec, source: rasterio.DatasetReader) -> tuple[Wind
         )
 
     return window, factor
+
+
+def write_cell_bands(
+    spec: GridSpec, path: Path, bands: dict[str, npt.NDArray[np.float64]]
+) -> Path:
+    """Write one flat array per band, in `cell_id` order, onto the grid's own lattice.
+
+    The inverse of `read_cell_bands`. Arrays cover the whole grid, not just the active cells,
+    so the reshape into rows and columns is the identity `cell_id` already encodes.
+    """
+    if not bands:
+        raise ValueError(f"No bands to write to {path}")
+
+    expected = (spec.n_cells,)
+    wrong = {name: values.shape for name, values in bands.items() if values.shape != expected}
+    if wrong:
+        raise ValueError(f"Bands are not flat {spec.n_cells}-cell arrays: {wrong}")
+
+    names = list(bands)
+    stacked = np.stack([bands[name] for name in names]).reshape(
+        len(names), spec.n_rows, spec.n_cols
+    )
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        width=spec.n_cols,
+        height=spec.n_rows,
+        count=len(names),
+        dtype="float32",
+        crs=spec.crs,
+        transform=rasterio.Affine(*grid_transform(spec)),
+        nodata=np.nan,
+        compress="lzw",
+    ) as sink:
+        sink.write(stacked.astype("float32"))
+        for index, name in enumerate(names, start=1):
+            sink.set_band_description(index, name)
+
+    logger.info("Wrote %d band(s) of %d cell(s) to %s", len(names), spec.n_cells, path.name)
+    return path
 
 
 def read_cell_bands(
