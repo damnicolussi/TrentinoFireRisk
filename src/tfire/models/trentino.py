@@ -42,6 +42,7 @@ SEARCH_SPACE: Final[dict[str, tuple[float, float]]] = {
 INTEGER_PARAMS: Final = frozenset({"max_depth", "min_child_weight"})
 LOG_SCALE: Final = frozenset({"learning_rate", "reg_lambda"})
 
+
 class Estimator(Protocol):
     """What the training loop needs from a model, whether it is XGBoost or an sklearn pipeline."""
 
@@ -258,9 +259,67 @@ def tune(
     }
 
 
-def _final_params(tuning: dict[str, Any]) -> dict[str, Any]:
+def final_params(tuning: dict[str, Any]) -> dict[str, Any]:
     """The tuned settings with the search's early stopping replaced by the settled count."""
     return {**tuning["params"], "n_estimators": tuning["rounds"], "early_stopping_rounds": None}
+
+
+@dataclass(frozen=True)
+class Fitted:
+    """A model fitted on the training years"""
+
+    estimator: Estimator
+    columns: list[str]
+    out_of_fold: npt.NDArray[np.float64]
+    holdout: npt.NDArray[np.float64]
+    fold_scores: list[dict[str, Any]]
+
+
+def fit_holdout(
+    spec: ModelSpec,
+    features: pd.DataFrame,
+    labels: npt.NDArray[np.int8],
+    train: npt.NDArray[np.bool_],
+    config: Config,
+    tuning: dict[str, Any],
+) -> tuple[Estimator, list[str], npt.NDArray[np.float64]]:
+    """One fit on the training years and its probabilities over the held-out ones."""
+    columns = spec.columns(list(features.columns))
+    estimator = spec.build(config, positive_weight(labels[train]))
+    if spec.tuned:
+        estimator.set_params(**final_params(tuning))
+    _fit(spec, estimator, (features.loc[train][columns], labels[train]), None)
+
+    holdout = estimator.predict_proba(features.loc[~train][columns])[:, 1]
+    return estimator, columns, holdout
+
+
+def fit_and_predict(
+    spec: ModelSpec,
+    features: pd.DataFrame,
+    labels: npt.NDArray[np.int8],
+    years: pd.Series,
+    train: npt.NDArray[np.bool_],
+    config: Config,
+    tuning: dict[str, Any],
+) -> Fitted:
+    """Year-blocked CV inside the training span, then one fit scoring the held-out years."""
+    out_of_fold, _, fold_scores = cross_validate(
+        spec,
+        features.loc[train],
+        labels[train],
+        years.loc[train],
+        config,
+        tuning["params"] if spec.tuned else None,
+    )
+    estimator, columns, holdout = fit_holdout(spec, features, labels, train, config, tuning)
+    return Fitted(
+        estimator=estimator,
+        columns=columns,
+        out_of_fold=out_of_fold,
+        holdout=holdout,
+        fold_scores=fold_scores,
+    )
 
 
 def evaluate_spec(
@@ -272,30 +331,10 @@ def evaluate_spec(
     config: Config,
     tuning: dict[str, Any],
 ) -> dict[str, Any]:
-    """Year-blocked CV inside the training span, then one fit scored on the held-out years."""
-    params = _final_params(tuning) if spec.tuned else None
-    columns = spec.columns(list(features.columns))
-
-    out_of_fold, _, fold_scores = cross_validate(
-        spec,
-        features.loc[train],
-        labels[train],
-        years.loc[train],
-        config,
-        tuning["params"] if spec.tuned else None,
-    )
-    pooled = scores(labels[train], out_of_fold)
-
-    estimator = spec.build(config, positive_weight(labels[train]))
-    if params:
-        estimator.set_params(**params)
-    _fit(
-        spec,
-        estimator,
-        (features.loc[train][columns], labels[train]),
-        None,
-    )
-    held = scores(labels[~train], estimator.predict_proba(features.loc[~train][columns])[:, 1])
+    """One model's fold scores, pooled out-of-fold scores and holdout scores."""
+    fitted = fit_and_predict(spec, features, labels, years, train, config, tuning)
+    pooled = scores(labels[train], fitted.out_of_fold)
+    held = scores(labels[~train], fitted.holdout)
 
     logger.info(
         "%-20s | pooled AUPRC %.4f (lift %.2f) | holdout AUPRC %.4f (lift %.2f)",
@@ -306,12 +345,12 @@ def evaluate_spec(
         held["lift"],
     )
     return {
-        "features": len(columns),
-        "excluded": [name for name in features.columns if name not in set(columns)],
-        "folds": fold_scores,
+        "features": len(fitted.columns),
+        "excluded": [name for name in features.columns if name not in set(fitted.columns)],
+        "folds": fitted.fold_scores,
         "pooled_out_of_fold": pooled,
         "holdout": held,
-        "hyperparameters": params if spec.tuned else "fixed, see config",
+        "hyperparameters": final_params(tuning) if spec.tuned else "fixed, see config",
     }
 
 
@@ -325,7 +364,7 @@ def _ship(
     """Refit the tuned model on the whole record, which is what inference will load."""
     spec = SPECS["xgboost"]
     estimator = spec.build(config, positive_weight(labels))
-    estimator.set_params(**_final_params(tuning))
+    estimator.set_params(**final_params(tuning))
     estimator.fit(features[spec.columns(list(features.columns))], labels, verbose=False)
     cast("BoostedEstimator", estimator).save_model(path)
 

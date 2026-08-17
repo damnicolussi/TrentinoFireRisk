@@ -85,6 +85,9 @@ class PathsConfig(BaseModel):
     trentino_model_dir: Path
     dataset_out: Path
     quality_report_out: Path
+    sensitivity_dir: Path
+    report_dir: Path
+    figures_dir: Path
 
 
 class CorineConfig(BaseModel):
@@ -322,6 +325,27 @@ class TrentinoConfig(BaseModel):
     logistic: LogisticConfig
 
 
+class EvaluationConfig(BaseModel):
+    model_config = _STRICT
+
+    precision_at_k: list[float] = Field(min_length=1)
+    calibration_bins: int = Field(gt=1)
+    spatial_block_m: float = Field(gt=0)
+    spatial_folds: int = Field(gt=1)
+    shap_max_display: int = Field(gt=0)
+    figure_dpi: int = Field(gt=0)
+    negative_ratios: list[int] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def check_fractions(self) -> EvaluationConfig:
+        outside = [k for k in self.precision_at_k if not 0 < k <= 1]
+        if outside:
+            raise ValueError(f"precision_at_k are fractions in (0, 1], got {outside}")
+        if any(ratio < 1 for ratio in self.negative_ratios):
+            raise ValueError(f"negative_ratios must be positive, got {self.negative_ratios}")
+        return self
+
+
 class DatasetConfig(BaseModel):
     model_config = _STRICT
 
@@ -356,6 +380,7 @@ class Config(BaseModel):
     sampling: SamplingConfig
     mesogeos: MesogeosConfig
     trentino: TrentinoConfig
+    evaluation: EvaluationConfig
     dataset: DatasetConfig
     logging: LoggingConfig
 

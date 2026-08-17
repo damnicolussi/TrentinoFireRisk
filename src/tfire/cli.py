@@ -13,10 +13,12 @@ from tfire.datasets import build_dataset
 from tfire.features import EXTRACTORS
 from tfire.fires import build_positives
 from tfire.grid import build_grid
+from tfire.models.evaluate import evaluate_trentino
 from tfire.models.mesogeos import train_mesogeos
 from tfire.models.trentino import SPECS, train_trentino
 from tfire.preflight import CHECKS, check_access
 from tfire.sampling import build_samples
+from tfire.sensitivity import VARIANTS
 from tfire.sources.era5land import fetch_era5, fetch_years
 from tfire.sources.landsat import fetch_landsat
 
@@ -47,6 +49,13 @@ CategoryOption = Annotated[
 ModelOption = Annotated[
     list[str] | None,
     typer.Option("--model", help="Model to train; repeatable. Defaults to all."),
+]
+VariantOption = Annotated[
+    list[str] | None,
+    typer.Option(
+        "--sensitivity",
+        help="Sensitivity variant to run; repeatable, `all` for every one. Defaults to none.",
+    ),
 ]
 YearOption = Annotated[
     list[int] | None,
@@ -135,6 +144,23 @@ def train_command(
         names = [name for name in SPECS if name in set(names)]
 
     train_trentino(_start(config), force=force, selected=names)
+
+
+@app.command("evaluate")
+def evaluate_command(
+    config: ConfigOption = None,
+    sensitivity: VariantOption = None,
+    force: ForceOption = False,
+) -> None:
+    """Score, attribute and calibrate the trained model, and write the evaluation figures."""
+    if sensitivity:
+        unknown = sorted(set(sensitivity) - set(VARIANTS) - {"all"})
+        if unknown:
+            raise typer.BadParameter(
+                f"Unknown variant(s): {', '.join(unknown)}. Choose from {sorted(VARIANTS)} or all."
+            )
+
+    evaluate_trentino(_start(config), force=force, variants=sensitivity)
 
 
 @app.command("build-dataset")

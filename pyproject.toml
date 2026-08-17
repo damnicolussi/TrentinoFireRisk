@@ -120,6 +120,7 @@ module = [
     "holidays.*",
     "xgboost.*",
     "sklearn.*",
+    "shap.*",
 ]
 ignore_missing_imports = true
 

@@ -46,6 +46,9 @@ paths:
   trentino_model_dir: "models/trentino"
   dataset_out: "data/processed/trentino_dataset.parquet"
   quality_report_out: "data/processed/data_quality.json"
+  sensitivity_dir: "data/interim/sensitivity"
+  report_dir: "reports"
+  figures_dir: "reports/figures"
 
 corine:
   # 5 km of slack around the boundary. A 500 m cell straddling the border needs
@@ -226,8 +229,9 @@ human:
 sampling:
   negative_ratio: 10
 
-  # level-3 exclusion around each burned polygon, in cells and in days. 1 cell is
-  # 500 m: 167,505 excluded (cell, date) pairs out of a pool of 340,359,552.
+  # level-3 exclusion around each burned polygon, in cells and in days. 1 cell is 500 m:
+  # 168,709 excluded (cell, date) pairs, 164,099 of them inside the burnable active pool of
+  # 340,359,552. The rest fall on cells a negative could not have been drawn from anyway.
   buffer_cells: 1
   buffer_days: 2
 
@@ -271,6 +275,26 @@ trentino:
   logistic:
     max_iter: 2000
     c: 1.0
+
+evaluation:
+  # share of the scored rows a responder could act on, for precision/recall at the top of the
+  # ranking. Global fractions, not per day: the sampled table holds too few rows per date.
+  precision_at_k: [0.01, 0.05, 0.10]
+
+  # quantile bins. Uniform ones leave the upper half empty at a 3.5% base rate.
+  calibration_bins: 10
+
+  # spatial blocks for the second CV. 20 km over a 117 x 96 km province is ~30 blocks, enough
+  # that no fold is one corner of Trentino, wide enough that a block's interior is far from
+  # any training cell.
+  spatial_block_m: 20000
+  spatial_folds: 5
+
+  shap_max_display: 20
+  figure_dpi: 300
+
+  # negative ratios the sensitivity run rebuilds, against the 1:10 of sampling.negative_ratio
+  negative_ratios: [5, 20]
 
 dataset:
   expected_rows: 34705

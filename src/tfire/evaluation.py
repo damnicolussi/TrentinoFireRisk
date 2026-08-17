@@ -1,9 +1,9 @@
-"""Year-blocked cross-validation and the scoring functions every model is measured with."""
+"""Blocked cross-validation in time and space, and the scores every model is measured with."""
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from typing import Any
 
 import numpy as np
@@ -37,6 +37,36 @@ def blocked_folds(years: pd.Series, n_folds: int) -> Iterator[tuple[Index, Index
         yield positions[~held], positions[held]
 
 
+def block_index(x: pd.Series, y: pd.Series, block_m: float) -> npt.NDArray[np.int64]:
+    """One integer per row identifying the `block_m` square its coordinates fall in."""
+    columns = np.floor(x.to_numpy("float64") / block_m).astype("int64")
+    rows = np.floor(y.to_numpy("float64") / block_m).astype("int64")
+    width = int(columns.max() - columns.min()) + 1
+    flat: npt.NDArray[np.int64] = (rows - rows.min()) * width + (columns - columns.min())
+    return flat
+
+
+def spatial_folds(
+    x: pd.Series, y: pd.Series, block_m: float, n_folds: int, seed: int
+) -> Iterator[tuple[Index, Index]]:
+    """Train and validation indices from square blocks of coordinates assigned to folds.
+
+    Whole blocks move together, so a cell's neighbors are held out with it. Blocks are
+    assigned at random rather than in reading order: contiguous assignment would make a fold
+    one corner of the province and measure the corner rather than the model.
+    """
+    blocks = block_index(x, y, block_m)
+    distinct = np.unique(blocks)
+    if len(distinct) < n_folds:
+        raise ValueError(f"{len(distinct)} block(s) cannot fill {n_folds} folds")
+
+    shuffled = np.random.default_rng(seed).permutation(distinct)
+    positions = np.arange(len(blocks), dtype=np.intp)
+    for group in np.array_split(shuffled, n_folds):
+        held = np.isin(blocks, group)
+        yield positions[~held], positions[held]
+
+
 def scores(labels: npt.NDArray[Any], probabilities: npt.NDArray[Any]) -> dict[str, float]:
     """AUPRC, AUROC and Brier, with the base rate the first two have to be read against."""
     from sklearn.metrics import average_precision_score, brier_score_loss, roc_auc_score
@@ -50,3 +80,69 @@ def scores(labels: npt.NDArray[Any], probabilities: npt.NDArray[Any]) -> dict[st
         "positive_rate": positive_rate,
         "lift": auprc / positive_rate,
     }
+
+
+def precision_at_k(
+    labels: npt.NDArray[Any], probabilities: npt.NDArray[Any], fractions: Sequence[float]
+) -> list[dict[str, float]]:
+    """Precision, recall and threshold over the top `fraction` of the ranking, per fraction.
+
+    What a responder with capacity for the top q of the scored cells would actually catch.
+    Ties at the cut are taken in the order `argsort` returns them, so a k landing inside a
+    plateau of equal probabilities is arbitrary but reproducible.
+    """
+    order = np.argsort(-probabilities, kind="stable")
+    ranked = labels[order]
+    positives = int(labels.sum())
+
+    rows = []
+    for fraction in fractions:
+        k = max(1, int(round(fraction * len(labels))))
+        caught = int(ranked[:k].sum())
+        rows.append(
+            {
+                "fraction": float(fraction),
+                "k": k,
+                "caught": caught,
+                "precision": caught / k,
+                "recall": caught / positives if positives else float("nan"),
+                "threshold": float(probabilities[order[k - 1]]),
+            }
+        )
+    return rows
+
+
+def calibration_bins(
+    labels: npt.NDArray[Any], probabilities: npt.NDArray[Any], n_bins: int
+) -> list[dict[str, float]]:
+    """Predicted against observed frequency over `n_bins` quantile bins of the probability.
+
+    Quantile rather than equal-width: at a base rate this low nearly every prediction sits in
+    the bottom tenth of the [0, 1] range and equal-width bins report nine empty rows.
+    """
+    edges = np.unique(np.quantile(probabilities, np.linspace(0, 1, n_bins + 1)))
+    assigned = np.clip(np.searchsorted(edges, probabilities, side="left") - 1, 0, len(edges) - 2)
+
+    rows = []
+    for index in range(len(edges) - 1):
+        members = assigned == index
+        count = int(members.sum())
+        if not count:
+            continue
+        rows.append(
+            {
+                "bin": index,
+                "count": count,
+                "predicted": float(probabilities[members].mean()),
+                "observed": float(labels[members].mean()),
+            }
+        )
+    return rows
+
+
+def expected_calibration_error(bins: Sequence[dict[str, float]]) -> float:
+    """Count-weighted mean gap between predicted and observed frequency."""
+    total = sum(row["count"] for row in bins)
+    if not total:
+        raise ValueError("no populated calibration bins")
+    return sum(row["count"] * abs(row["predicted"] - row["observed"]) for row in bins) / total

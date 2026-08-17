@@ -200,6 +200,19 @@ def _flat_exclusions(
     return flat
 
 
+def negative_pool(
+    grid: pd.DataFrame, exclusions: pd.DataFrame, config: Config
+) -> tuple[npt.NDArray[Any], pd.DatetimeIndex, npt.NDArray[np.int64]]:
+    """The cell-days a negative can come from: burnable active grid x record, less exclusions.
+
+    Shared with the calibration prior correction, which needs the size of the population the
+    negatives were subsampled out of and cannot afford to describe it differently from here.
+    """
+    pool = grid.loc[grid["is_trentino"] & ~grid["is_non_burnable"], "cell_id"].to_numpy()
+    days = pd.date_range(config.date_range.start, config.date_range.end)
+    return pool, days, _flat_exclusions(exclusions, pool, days)
+
+
 def sample_negatives(
     grid: pd.DataFrame,
     exclusions: pd.DataFrame,
@@ -213,11 +226,8 @@ def sample_negatives(
             "Hard-negative mining draws from high-FWI days, and the FWI series arrives with M5"
         )
 
-    pool = grid.loc[grid["is_trentino"] & ~grid["is_non_burnable"], "cell_id"].to_numpy()
-    days = pd.date_range(config.date_range.start, config.date_range.end)
+    pool, days, blocked = negative_pool(grid, exclusions, config)
     total = len(pool) * len(days)
-
-    blocked = _flat_exclusions(exclusions, pool, days)
     available = total - len(blocked)
     if n_negatives > available:
         raise ValueError(f"Asked for {n_negatives} negatives, only {available} cell-days available")
