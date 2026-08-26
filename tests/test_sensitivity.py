@@ -6,6 +6,8 @@ import numpy as np
 import pandas as pd
 
 from tfire.config import Config
+from tfire.features.registry import Registry, load_registry
+from tfire.models.trentino import design_matrix
 from tfire.sensitivity import VARIANTS, resolve, shifted_samples
 
 
@@ -63,3 +65,20 @@ def test_resolve_defaults_to_every_variant() -> None:
     assert resolve(None) == list(VARIANTS)
     assert resolve(["all"]) == list(VARIANTS)
     assert resolve(["negative_ratio_5"]) == ["negative_ratio_5"]
+
+
+def test_dropping_a_block_removes_exactly_its_columns() -> None:
+    """A category name that matches nothing would report the baseline as an ablation."""
+    registry = load_registry()
+    frame = pd.DataFrame(
+        {"is_fire": [0, 1], "date": pd.to_datetime(["1990-01-01", "1990-01-02"])}
+        | {spec.name: [0.0, 1.0] for spec in registry.features if spec.dtype != "category"}
+    )
+
+    full, _, _ = design_matrix(frame, registry)
+    for block in {spec.category for spec in registry.present(frame)}:
+        kept = [spec for spec in registry.specs if spec.category != block]
+        reduced, _, _ = design_matrix(frame, Registry(kept, registry.categories))
+        dropped = set(full.columns) - set(reduced.columns)
+        assert dropped == {spec.name for spec in registry.present(frame) if spec.category == block}
+        assert set(reduced.columns) < set(full.columns)

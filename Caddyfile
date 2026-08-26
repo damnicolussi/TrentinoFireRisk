@@ -1,0 +1,11 @@
+# With TFIRE_DOMAIN set, Caddy obtains a certificate for it on its own. Left unset the site
+# answers on port 80, which is the local check.
+{$TFIRE_DOMAIN::80} {
+	encode zstd gzip
+
+	# set from the observed peer rather than appended to whatever arrived, so a client cannot
+	# claim someone else's address and spend their share of the rate limit
+	reverse_proxy app:8000 {
+		header_up X-Forwarded-For {remote_host}
+	}
+}

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from dataclasses import dataclass
 from datetime import date, timedelta
+from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
@@ -32,7 +34,8 @@ from tfire.models.trentino import (
     design_matrix,
 )
 from tfire.raster import write_cell_bands
-from tfire.sources import forecast
+from tfire.sources import bias, forecast
+from tfire.sources.bias import load_bias_map
 from tfire.sources.era5land import read_lattice
 
 if TYPE_CHECKING:
@@ -45,6 +48,15 @@ MODEL_FILENAME: Final = "model.json"
 
 PROBABILITY_BAND: Final = "probability"
 RANK_BAND: Final = "rank"
+
+DRIVER_COLUMNS: Final = (
+    "fwi",
+    "temp_mean",
+    "rh_mean",
+    "wind_speed_mean",
+    "precip_cum30",
+    "ndvi",
+)
 
 
 class FeatureUnavailableError(Exception):
@@ -77,6 +89,16 @@ def model_directory(config: Config) -> Path:
     return config.path(config.paths.trentino_model_dir) / config.trentino.version
 
 
+def model_fingerprint(config: Config) -> str:
+    """Short digest of the estimator and its calibrator, to stamp a map with what scored it."""
+    directory = model_directory(config)
+    digest = hashlib.sha256()
+    for name in (MODEL_FILENAME, CALIBRATOR_FILENAME):
+        path = directory / name
+        digest.update(path.read_bytes() if path.is_file() else b"")
+    return digest.hexdigest()[:16]
+
+
 def load_model(config: Config) -> tuple[Estimator, list[str], Calibrator]:
     """The shipped estimator, the columns it was fitted on, and its calibrator."""
     from xgboost import XGBClassifier
@@ -91,7 +113,7 @@ def load_model(config: Config) -> tuple[Estimator, list[str], Calibrator]:
     metrics = json.loads((directory / METRICS_FILENAME).read_text(encoding="utf-8"))
     stamp = metrics.get("config_sha256")
     if stamp != config.digest():
-        # the digest covers the whole file, so adding a setting inference needs is enough to move it.
+        # the digest covers the whole file, so one added setting is enough to move it
         logger.info("Config has changed since training: %s -> %s", stamp[:12], config.digest()[:12])
 
     estimator = XGBClassifier()
@@ -100,8 +122,43 @@ def load_model(config: Config) -> tuple[Estimator, list[str], Calibrator]:
     return estimator, list(metrics["columns"]), calibrator
 
 
+def table_last_date(path: Path) -> date | None:
+    """Latest `date` in a Parquet table, off the row-group statistics."""
+    if not path.is_file():
+        return None
+
+    import pyarrow.parquet as pq
+
+    metadata = pq.ParquetFile(path).metadata
+    index = metadata.schema.names.index("date")
+    maxima = [
+        metadata.row_group(group).column(index).statistics.max
+        for group in range(metadata.num_row_groups)
+        if metadata.row_group(group).column(index).statistics is not None
+    ]
+    return pd.Timestamp(max(maxima)).date() if maxima else None
+
+
+@lru_cache(maxsize=8)
+def _last_date_for(path: Path, stamp: tuple[float, int] | None) -> date | None:
+    return table_last_date(path)
+
+
+def _stamped_last_date(path: Path) -> date | None:
+    if not path.is_file():
+        return None
+    info = path.stat()
+    return _last_date_for(path, (info.st_mtime, info.st_size))
+
+
 def cached_span(config: Config) -> tuple[date, date]:
-    return config.date_range.start, config.date_range.end
+    ends = [
+        _stamped_last_date(config.path(relative))
+        for relative in (config.paths.meteo_out, config.paths.fwi_out)
+    ]
+    reached = [value for value in ends if value is not None]
+    end = min(reached) if len(reached) == len(ends) else config.date_range.end
+    return config.date_range.start, max(end, config.date_range.end)
 
 
 def plan_days(config: Config, days: list[date], today: date | None = None) -> Plan:
@@ -134,9 +191,9 @@ def plan_days(config: Config, days: list[date], today: date | None = None) -> Pl
             first, ["meteo", *INDEX_NAMES], f"the record starts at {cached_start}."
         )
 
-    window_start = first - timedelta(days=config.forecast.spinup_days)
+    window_start, window_end = forecast.spinup_window(config, first, last, stamp)
     try:
-        segments = forecast.plan_span(config, window_start, last, stamp)
+        segments = forecast.plan_span(config, window_start, window_end, stamp)
     except forecast.ForecastError as error:
         raise FeatureUnavailableError(first, ["meteo", *INDEX_NAMES], str(error)) from error
     return Plan(days, stamp, meteo_from_cache=False, segments=segments)
@@ -160,12 +217,23 @@ def _backbone_daily(config: Config, plan: Plan, lattice: Lattice) -> pd.DataFram
     add_lag_features(columns, config)
     frame = to_frame(dates, columns, lattice)
 
+    table = load_bias_map(config)
+    if table is not None:
+        frame = bias.correct(frame, table, config)
+
     fwi = compute_fwi(frame[["era5_id", "date", *NOON_COLUMNS]], lattice.cell_latitudes())
     merged = frame.merge(fwi, on=["era5_id", "date"], how="left", validate="1:1")
 
     # the spin-up exists so the lag columns and the FWI codes have history to stand on
     wanted = pd.to_datetime(sorted(plan.days))
     return merged[merged["date"].isin(wanted)]
+
+
+def active_cells(config: Config) -> npt.NDArray[np.int64]:
+    """The cells a prediction covers: the same population the negatives are drawn from."""
+    _, grid = load_grid(config)
+    active: npt.NDArray[np.int64] = grid.loc[grid["is_trentino"], "cell_id"].to_numpy("int64")
+    return active
 
 
 def static_frame(config: Config, day: date) -> pd.DataFrame:
@@ -296,6 +364,7 @@ def write_day(
             "cell_id": frame["cell_id"].to_numpy("int32"),
             PROBABILITY_BAND: probability.astype("float32"),
             RANK_BAND: rank.astype("float32"),
+            **{name: frame[name].to_numpy("float32") for name in DRIVER_COLUMNS},
         }
     )
     paths["table"].parent.mkdir(parents=True, exist_ok=True)
@@ -324,7 +393,9 @@ def _provenance(
     return {
         "date": day,
         "model_version": config.trentino.version,
+        "model_fingerprint": model_fingerprint(config),
         "sources": plan.sources,
+        "bias_map": None if plan.meteo_from_cache else bias.bias_fingerprint(config),
         "cells": len(frame),
         "vegetation": {
             "composite": frame["veg_composite_date"].iloc[0],
@@ -342,6 +413,54 @@ def _provenance(
     }
 
 
+class GridScorer:
+    """Scores whole days on the active grid, reusing the blocks that do not move between them."""
+
+    def __init__(self, config: Config, days: list[date], today: date | None = None) -> None:
+        self.config = config
+        self.plan = plan_days(config, days, today)
+        self.registry = load_registry()
+        self.estimator, self.columns, self.calibrator = load_model(config)
+        self.spec, _ = load_grid(config)
+
+        lattice = read_lattice(config)
+        self._weights = pd.read_parquet(config.path(config.paths.era5_weights_out))
+        self._backbone = _backbone_daily(config, self.plan, lattice)
+
+        # both blocks are step functions of the date, so a span rarely needs more than one each
+        self._statics: dict[tuple[int, int], pd.DataFrame] = {}
+        self._vegetation: dict[date, pd.DataFrame] = {}
+
+    def day(
+        self, day: date
+    ) -> tuple[pd.DataFrame, npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+        stamp = pd.Series([pd.Timestamp(day)])
+        key = (
+            int(nearest_edition(stamp, self.config.corine.editions).iloc[0]),
+            int(nearest_edition(stamp, self.config.human.worldpop_years).iloc[0]),
+        )
+        if key not in self._statics:
+            self._statics[key] = static_frame(self.config, day)
+
+        composite = preceding_month(day)
+        if composite not in self._vegetation:
+            self._vegetation[composite] = operational_window(self.config, composite)
+
+        frame = assemble_day(
+            self.config,
+            day,
+            self._statics[key],
+            self._backbone,
+            self._weights,
+            self._vegetation[composite],
+        )
+        check_contract(frame, self.registry, day)
+        probability, rank = score(
+            frame, self.registry, self.estimator, self.columns, self.calibrator
+        )
+        return frame, probability, rank
+
+
 def predict_days(
     config: Config,
     start: date,
@@ -356,55 +475,26 @@ def predict_days(
         logger.info("All %d day(s) already written (use --force to rebuild)", len(wanted))
         return []
 
-    plan = plan_days(config, pending, today)
+    scorer = GridScorer(config, pending, today)
     logger.info(
         "Predicting %d day(s), %s to %s, from %s",
         len(pending),
         min(pending),
         max(pending),
-        ", ".join(plan.sources),
+        ", ".join(scorer.plan.sources),
     )
-
-    registry = load_registry()
-    estimator, columns, calibrator = load_model(config)
-    spec, _ = load_grid(config)
-    lattice = read_lattice(config)
-    weights = pd.read_parquet(config.path(config.paths.era5_weights_out))
-
-    backbone = _backbone_daily(config, plan, lattice)
-
-    # both blocks are step functions of the date, so a span rarely needs more than one of each
-    statics: dict[tuple[int, int], pd.DataFrame] = {}
-    vegetation: dict[date, pd.DataFrame] = {}
 
     written = []
     for day in pending:
-        stamp = pd.Series([pd.Timestamp(day)])
-        key = (
-            int(nearest_edition(stamp, config.corine.editions).iloc[0]),
-            int(nearest_edition(stamp, config.human.worldpop_years).iloc[0]),
-        )
-        if key not in statics:
-            statics[key] = static_frame(config, day)
-
-        composite = preceding_month(day)
-        if composite not in vegetation:
-            vegetation[composite] = operational_window(config, composite)
-
-        frame = assemble_day(
-            config, day, statics[key], backbone, weights, vegetation[composite]
-        )
-        check_contract(frame, registry, day)
-        probability, rank = score(frame, registry, estimator, columns, calibrator)
-
+        frame, probability, rank = scorer.day(day)
         paths = write_day(
             config,
             day,
-            spec,
+            scorer.spec,
             frame,
             probability,
             rank,
-            _provenance(config, day, plan, frame, probability),
+            _provenance(config, day, scorer.plan, frame, probability),
         )
         logger.info(
             "%s | mean %.2e, max %.2e over %d cell(s) -> %s",

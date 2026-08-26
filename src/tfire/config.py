@@ -71,6 +71,9 @@ class PathsConfig(BaseModel):
     era5_weights_out: Path
     meteo_out: Path
     fwi_out: Path
+    bias_map_out: Path
+    fire_history_out: Path
+    climatology_out: Path
     landsat_raw: Path
     vegetation_out: Path
     vegetation_climatology_out: Path
@@ -91,6 +94,11 @@ class PathsConfig(BaseModel):
     risk_dir: Path
     report_dir: Path
     figures_dir: Path
+    overlay_dir: Path
+    jobs_dir: Path
+    app_state_out: Path
+    frontend_dir: Path
+    runtime_manifest_out: Path
 
 
 class CorineConfig(BaseModel):
@@ -180,6 +188,7 @@ class MeteoConfig(BaseModel):
     variables: list[str] = Field(min_length=1)
     utc_offset_hours: int = Field(ge=-12, le=14)
     spinup_years: int = Field(ge=0)
+    extension_end: date | None = None
     gee_workers: int = Field(gt=0)
     gee_window_hours: int = Field(gt=0)
     precip_windows: list[int] = Field(min_length=1)
@@ -212,6 +221,33 @@ class MeteoConfig(BaseModel):
         return max(*self.precip_windows, self.temp_window_days, self.rh_window_days)
 
 
+class HistoryConfig(BaseModel):
+    model_config = _STRICT
+
+    bandwidth_m: float = Field(gt=0)
+    window_years: int = Field(gt=0)
+
+
+class ClimatologyConfig(BaseModel):
+    model_config = _STRICT
+
+    columns: list[str] = Field(min_length=1)
+
+
+class BiasConfig(BaseModel):
+    model_config = _STRICT
+
+    columns: list[str] = Field(min_length=1)
+    reference_years: list[int] = Field(min_length=2, max_length=2)
+
+    @model_validator(mode="after")
+    def check_years(self) -> BiasConfig:
+        first, last = self.reference_years
+        if last < first:
+            raise ValueError(f"reference_years must run forwards, got {self.reference_years}")
+        return self
+
+
 class FWIConfig(BaseModel):
     model_config = _STRICT
 
@@ -221,6 +257,9 @@ class FWIConfig(BaseModel):
     max_isi: float = Field(gt=0)
     max_bui: float = Field(gt=0)
     max_fwi: float = Field(gt=0)
+    max_mean_fwi: float = Field(gt=0)
+    spring_reset_dc: float = Field(gt=0)
+    min_spring_reset_share: float = Field(gt=0, le=1)
 
 
 class VegetationConfig(BaseModel):
@@ -320,12 +359,29 @@ class TrentinoConfig(BaseModel):
 
     version: str
     test_years_start: int
+    danger_percentiles: list[float] = Field(min_length=1)
+    danger_reference_stride: int = Field(gt=0)
     cv_folds: int = Field(gt=1)
     optuna_trials: int = Field(gt=0)
     early_stopping_rounds: int = Field(gt=0)
     max_estimators: int = Field(gt=0)
     random_forest: RandomForestConfig
     logistic: LogisticConfig
+
+    @model_validator(mode="after")
+    def check_percentiles(self) -> TrentinoConfig:
+        outside = [p for p in self.danger_percentiles if not 0 < p < 100]
+        if outside:
+            raise ValueError(f"danger_percentiles are in (0, 100), got {outside}")
+        if sorted(set(self.danger_percentiles)) != self.danger_percentiles:
+            raise ValueError(
+                f"danger_percentiles must be strictly increasing: {self.danger_percentiles}"
+            )
+        return self
+
+    @property
+    def n_danger_classes(self) -> int:
+        return len(self.danger_percentiles) + 1
 
 
 class EvaluationConfig(BaseModel):
@@ -338,6 +394,7 @@ class EvaluationConfig(BaseModel):
     shap_max_display: int = Field(gt=0)
     figure_dpi: int = Field(gt=0)
     negative_ratios: list[int] = Field(min_length=1)
+    bootstrap_resamples: int = Field(gt=0)
 
     @model_validator(mode="after")
     def check_fractions(self) -> EvaluationConfig:
@@ -384,6 +441,46 @@ class ForecastConfig(BaseModel):
         return self
 
 
+class BasemapConfig(BaseModel):
+    model_config = _STRICT
+
+    key: str
+    url: str
+    attribution: str
+
+
+class AppConfig(BaseModel):
+    model_config = _STRICT
+
+    host: str
+    port: int = Field(gt=0, le=65535)
+    on_demand: bool
+    overlay_max_px: int = Field(gt=0)
+    overlay_opacity: float = Field(gt=0, le=1)
+    session_ttl_minutes: int = Field(gt=0)
+    default_language: Literal["it", "en"]
+    min_zoom: int = Field(ge=0, le=22)
+    max_zoom: int = Field(ge=0, le=22)
+    bounds_margin_deg: float = Field(ge=0)
+    warm_window_days: list[int] = Field(min_length=2, max_length=2)
+    cache_max_gb: float = Field(gt=0)
+    uncached_requests_per_hour: int = Field(ge=0)
+    login_attempts_per_hour: int = Field(gt=0)
+    job_log_tail_lines: int = Field(gt=0)
+    basemaps: list[BasemapConfig] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def check_ranges(self) -> AppConfig:
+        if self.max_zoom <= self.min_zoom:
+            raise ValueError(f"max_zoom ({self.max_zoom}) must exceed min_zoom ({self.min_zoom})")
+        if self.warm_window_days[0] > self.warm_window_days[1]:
+            raise ValueError(f"warm_window_days must be ordered: {self.warm_window_days}")
+        keys = [basemap.key for basemap in self.basemaps]
+        if len(set(keys)) != len(keys):
+            raise ValueError(f"basemap keys must be unique: {keys}")
+        return self
+
+
 class LoggingConfig(BaseModel):
     model_config = _STRICT
 
@@ -405,6 +502,9 @@ class Config(BaseModel):
     topography: TopographyConfig
     geography: GeographyConfig
     meteo: MeteoConfig
+    history: HistoryConfig
+    climatology: ClimatologyConfig
+    bias: BiasConfig
     fwi: FWIConfig
     vegetation: VegetationConfig
     human: HumanConfig
@@ -414,9 +514,19 @@ class Config(BaseModel):
     evaluation: EvaluationConfig
     dataset: DatasetConfig
     forecast: ForecastConfig
+    app: AppConfig
     logging: LoggingConfig
 
     project_root: Path
+
+    @model_validator(mode="after")
+    def check_extension(self) -> Config:
+        end = self.meteo.extension_end
+        if end is not None and end <= self.date_range.end:
+            raise ValueError(
+                f"meteo.extension_end ({end}) must be after date_range.end ({self.date_range.end})"
+            )
+        return self
 
     def path(self, relative: Path) -> Path:
         """Resolve a config-declared path against the project root."""
@@ -424,7 +534,7 @@ class Config(BaseModel):
 
     def digest(self) -> str:
         """sha256 of the settings, for stamping an artifact with the run that produced it."""
-        payload = self.model_dump(mode="json", exclude={"project_root"})
+        payload = self.model_dump(mode="json", exclude={"project_root", "app"})
         canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 

@@ -7,8 +7,10 @@ from collections.abc import Callable
 import pandas as pd
 
 from tfire.config import Config
+from tfire.features.climatology import extract_climatology
 from tfire.features.fwi import extract_fwi
 from tfire.features.geography import extract_geography
+from tfire.features.history import extract_history
 from tfire.features.human import extract_human
 from tfire.features.landcover import extract_landcover
 from tfire.features.meteo import extract_meteo
@@ -21,7 +23,9 @@ EXTRACTORS: dict[str, Callable[[Config, bool], pd.DataFrame]] = {
     "geography": extract_geography,
     "landcover": extract_landcover,
     "human": extract_human,
+    "history": extract_history,
     "vegetation": extract_vegetation,
     "meteo": extract_meteo,
     "fwi": extract_fwi,
+    "climatology": extract_climatology,
 }

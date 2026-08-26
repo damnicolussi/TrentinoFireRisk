@@ -12,14 +12,24 @@ import pytest
 from tfire.config import Config
 from tfire.features.meteo import HourlyFields, aggregate_daily, era5_hourly
 from tfire.grid import GridSpec
-from tfire.inference import FeatureUnavailableError, plan_days
+from tfire.inference import FeatureUnavailableError, cached_span, plan_days
 from tfire.models.trentino import align_columns
 from tfire.raster import read_cell_bands, write_cell_bands
-from tfire.sources.forecast import ForecastError, plan_span
+from tfire.sources.forecast import ForecastError, plan_span, spinup_window
 
+from .conftest import requires_built
 from .test_meteo import hourly
 
 TODAY = date(2026, 8, 16)
+
+
+def _days_of(year: int, month: int) -> list[date]:
+    first = date(year, month, 1)
+    return [
+        first + timedelta(days=offset)
+        for offset in range(31)
+        if (first + timedelta(days=offset)).month == month
+    ]
 
 
 def test_the_forecast_adapter_aggregates_exactly_like_the_era5_one(config: Config) -> None:
@@ -44,6 +54,8 @@ def test_the_forecast_adapter_aggregates_exactly_like_the_era5_one(config: Confi
         precip_mm=era5.precip_mm,
         wind_speed=era5.wind_speed,
         wind_dir=era5.wind_dir,
+        soil_water_l1=era5.soil_water_l1,
+        soil_water_l2=era5.soil_water_l2,
     )
 
     reference, expected = aggregate_daily(era5, config)
@@ -93,15 +105,28 @@ def test_alignment_refuses_a_matrix_that_is_not_the_stored_one(
         (date(2000, 6, 1), ["cached"]),
         (date(1984, 1, 1), ["cached"]),
         (date(2024, 12, 31), ["cached"]),
-        (date(2025, 1, 1), ["archive"]),
+        # the backbone runs past the modeling window, and those days are cached too
+        (date(2025, 1, 1), ["cached"]),
+        (date(2026, 7, 1), ["archive"]),
         (TODAY, ["archive", "forecast"]),
         (TODAY + timedelta(days=10), ["archive", "forecast"]),
     ],
-    ids=["mid record", "first day", "last cached day", "just past it", "today", "the horizon"],
+    ids=[
+        "mid record",
+        "first day",
+        "last day of the modeling window",
+        "inside the extension",
+        "just past the backbone",
+        "today",
+        "the horizon",
+    ],
 )
 def test_every_date_in_range_finds_a_provider(
     config: Config, day: date, expected: list[str]
 ) -> None:
+    if expected == ["cached"]:
+        requires_built(config, config.paths.meteo_out, config.paths.fwi_out)
+
     plan = plan_days(config, [day], today=TODAY)
 
     if expected == ["cached"]:
@@ -126,12 +151,35 @@ def test_a_date_no_source_covers_names_what_it_cannot_build(config: Config, day:
 def test_the_spin_up_is_taken_from_the_archive_not_the_forecast(config: Config) -> None:
     """The forecast endpoint's own past is shorter than the spin-up, so the seam has to fall
     inside the archive's reach or the codes would start from nothing."""
-    segments = plan_span(
-        config, TODAY - timedelta(days=config.forecast.spinup_days), TODAY, TODAY
-    )
+    segments = plan_span(config, TODAY - timedelta(days=config.forecast.spinup_days), TODAY, TODAY)
 
     assert [piece.provider for piece in segments] == ["archive", "forecast"]
     assert segments[0].end + timedelta(days=1) == segments[1].start
+
+
+def test_every_date_in_a_month_asks_for_the_same_download(config: Config) -> None:
+    """A window unique to each date costs downloads, not an error, so nothing else catches it.
+
+    Stepping back a day used to refetch three months of hourly weather, because the cache is
+    keyed by the span requested.
+    """
+    windows = {spinup_window(config, day, day, TODAY) for day in _days_of(2019, 3)}
+    assert len(windows) == 1
+
+    start, end = windows.pop()
+    assert (start.day, end.day) == (1, 31)
+    assert start <= date(2019, 3, 1) - timedelta(days=config.forecast.spinup_days)
+
+    # a span crossing a month boundary reaches from the earlier spin-up to the later month's end
+    crossing = spinup_window(config, date(2019, 3, 28), date(2019, 4, 2), TODAY)
+    assert crossing == (start, date(2019, 4, 30))
+
+
+def test_the_download_window_never_reaches_past_the_forecast_horizon(config: Config) -> None:
+    horizon = TODAY + timedelta(days=config.forecast.horizon_days)
+    for day in (TODAY, horizon):
+        _, end = spinup_window(config, day, day, TODAY)
+        assert end <= horizon
 
 
 def test_a_span_past_the_horizon_is_refused_before_anything_is_fetched(config: Config) -> None:
@@ -152,3 +200,34 @@ def test_a_written_raster_reads_back_cell_for_cell(tmp_path: Path) -> None:
 
     for name, expected in bands.items():
         np.testing.assert_allclose(back[name], expected, err_msg=name)
+
+
+def test_the_cached_span_follows_the_tables_rather_than_the_modeling_window(
+    config: Config, tmp_path: Path
+) -> None:
+    """A span short of the tables sends dates that are cached to a 0.25 degree provider instead."""
+    extended = tmp_path / "meteo.parquet"
+    frame = pd.DataFrame(
+        {
+            "era5_id": [0, 0],
+            "date": pd.to_datetime([config.date_range.end, date(2026, 6, 30)]),
+            "temp_mean": [1.0, 2.0],
+        }
+    )
+    frame.to_parquet(extended, index=False)
+
+    moved = config.model_copy(
+        update={
+            "paths": config.paths.model_copy(update={"meteo_out": extended, "fwi_out": extended})
+        }
+    )
+    assert cached_span(moved) == (config.date_range.start, date(2026, 6, 30))
+
+    # the two tables can disagree while one is being rebuilt, and the shorter one decides
+    short = tmp_path / "fwi.parquet"
+    frame.head(1).to_parquet(short, index=False)
+    half = moved.model_copy(update={"paths": moved.paths.model_copy(update={"fwi_out": short})})
+    assert cached_span(half) == (config.date_range.start, config.date_range.end)
+
+    # and a table that does not reach the modeling window never shortens it
+    assert cached_span(config)[1] >= config.date_range.end

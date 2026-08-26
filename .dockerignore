@@ -1,0 +1,16 @@
+data/
+models/
+reports/
+dist/
+
+*.md
+
+.git/
+.venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+**/__pycache__/
+notebooks/
+scripts/
+tests/

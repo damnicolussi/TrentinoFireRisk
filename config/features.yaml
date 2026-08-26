@@ -33,6 +33,11 @@ categories:
 
   topography:
     source: "Copernicus DEM GLO-30 via Earth Engine"
+    provider: "Copernicus DEM GLO-30"
+    period: "static (TanDEM-X acquisitions 2011-2015)"
+    resolution: "30 m to 500 m"
+    license: "© DLR e.V. 2010-2014 and © Airbus Defence and Space GmbH 2014-2018 provided under COPERNICUS by the European Union and ESA"
+    url: "https://developers.google.com/earth-engine/datasets/catalog/COPERNICUS_DEM_GLO30_2024_1"
     temporal: static
     forecastable: true
     dtype: float32
@@ -55,6 +60,11 @@ categories:
 
   geography:
     source: "grid lattice; PAT hydrography"
+    provider: "PAT, idrografia SIAT"
+    period: "static"
+    resolution: "vector to 500 m"
+    license: "PAT open data"
+    url: "https://siat.provincia.tn.it/"
     temporal: static
     forecastable: true
     dtype: float32
@@ -67,6 +77,11 @@ categories:
 
   landcover:
     source: "CORINE Land Cover, edition nearest in time"
+    provider: "CORINE Land Cover"
+    period: "1990 / 2000 / 2006 / 2012 / 2018"
+    resolution: "100 m to 500 m"
+    license: "Copernicus, free and open"
+    url: "https://land.copernicus.eu/en/products/corine-land-cover"
     temporal: static
     forecastable: true
     dtype: float32
@@ -139,7 +154,13 @@ categories:
       CLC_L1_5: {}
 
   human:
-    source: "OpenStreetMap; Natura 2000 (PAT); WorldPop"
+    source: "OpenStreetMap via Overpass; Natura 2000 from the PAT SIAT shapefile;
+      WorldPop via Earth Engine (WorldPop/GP/100m/pop)"
+    provider: "OpenStreetMap, WorldPop, Natura 2000"
+    period: "OSM snapshot; Natura 2000 2019; WorldPop 2000-2020"
+    resolution: "vector and 100 m to 500 m"
+    license: "ODbL (OSM); CC BY 4.0 (WorldPop); PAT open data (Natura 2000)"
+    url: "https://www.openstreetmap.org/copyright"
     temporal: static
     forecastable: true
     dtype: float32
@@ -159,6 +180,11 @@ categories:
 
   calendar:
     source: "derived from the date, no external source"
+    provider: "Python holidays"
+    period: "any date"
+    resolution: "daily"
+    license: "computed"
+    url: "https://pypi.org/project/holidays/"
     temporal: dynamic
     forecastable: true
     columns:
@@ -169,7 +195,13 @@ categories:
       is_holiday: {dtype: bool}
 
   vegetation:
-    source: "Landsat C2 L2 monthly composites, last one ending before the sample date"
+    source: "Landsat C2 L2 via Earth Engine (LT04, LT05, LE07, LC08, LC09), monthly
+      composites, last one ending before the sample date"
+    provider: "Landsat 4/5/7/8/9 Collection 2"
+    period: "1984-2024, monthly composites"
+    resolution: "30 m to 500 m"
+    license: "USGS, public domain"
+    url: "https://www.usgs.gov/landsat-missions/landsat-collection-2-level-2-science-products"
     temporal: dynamic
     forecastable: true
     dtype: float32
@@ -185,6 +217,11 @@ categories:
 
   meteo:
     source: "ERA5-Land, bilinear from the four surrounding backbone cells"
+    provider: "ERA5-Land (ECMWF)"
+    period: "1984 to 2026, hourly to daily"
+    resolution: "0.1 degrees (~9 km), 0.25 degrees on the served tail"
+    license: "Copernicus, free and open"
+    url: "https://developers.google.com/earth-engine/datasets/catalog/ECMWF_ERA5_LAND_HOURLY"
     temporal: dynamic
     forecastable: true
     dtype: float32
@@ -210,6 +247,9 @@ categories:
       rh_noon: {min: 0.0, max: 100.0}
       wind_speed_noon: {min: 0.0, max: 100.0}
       precip_noon24: {min: 0.0, max: "config:meteo.max_precip_mm"}
+      # volumetric soil water, m3/m3, bounded by the saturation of any real soil
+      soil_water_l1_mean: {min: 0.0, max: 1.0}
+      soil_water_l2_mean: {min: 0.0, max: 1.0}
       # a cumulative window can hold several days at the daily ceiling
       precip_cum7: {min: 0.0, max: 1000.0}
       precip_cum15: {min: 0.0, max: 1500.0}
@@ -219,6 +259,11 @@ categories:
 
   fwi:
     source: "Canadian FWI on the ERA5-Land backbone, nearest cell"
+    provider: "Canadian Forest Fire Weather Index"
+    period: "1984 to 2026"
+    resolution: "as the ERA5-Land backbone"
+    license: "computed with xclim"
+    url: "https://xclim.readthedocs.io/"
     temporal: dynamic
     forecastable: true
     dtype: float32
@@ -234,6 +279,11 @@ categories:
     # written by `tfire train-mesogeos`, which the assembly does not run itself, so the table
     # is valid at 137 features before the base model exists and 138 after
     source: "XGBoost on the Mesogeos Mediterranean tracks, scored on the Trentino values"
+    provider: "Mesogeos"
+    period: "2006-2022"
+    resolution: "1 km"
+    license: "CC BY 4.0"
+    url: "https://github.com/Orion-AI-Lab/mesogeos"
     temporal: dynamic
     forecastable: true
     dtype: float32

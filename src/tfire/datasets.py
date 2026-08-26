@@ -103,6 +103,19 @@ def attach_vegetation(samples: pd.DataFrame, config: Config) -> pd.DataFrame:
     return _join(samples, vegetation, ["cell_id", "veg_composite_date"])
 
 
+def attach_history(samples: pd.DataFrame, config: Config) -> pd.DataFrame:
+    """Join each row to the density built from the years before its own.
+
+    Clamped to the last year the table holds, so an operational date past the cadastre gets
+    the most recent density rather than no row at all.
+    """
+    history = _read(config, config.paths.fire_history_out)
+    last = int(history["year"].max())
+    samples["history_year"] = np.minimum(samples["date"].dt.year, last).astype("int16")
+    history = history.rename(columns={"year": "history_year"})
+    return _join(samples, history, ["cell_id", "history_year"])
+
+
 def attach_mesogeos_prob(samples: pd.DataFrame, config: Config) -> pd.DataFrame:
     """Score the assembled rows with the stacking base model, if one has been trained."""
     model_path = config.path(config.paths.mesogeos_model_dir) / MODEL_FILENAME

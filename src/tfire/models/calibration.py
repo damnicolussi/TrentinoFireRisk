@@ -22,6 +22,9 @@ CALIBRATOR_FILENAME = "calibrator.json"
 
 _EPSILON = 1e-9
 
+# Krichevsky-Trofimov: half a count on each side of every isotonic block
+_DAMPING = 0.5
+
 
 @dataclass(frozen=True)
 class Calibrator:
@@ -66,33 +69,60 @@ def sampling_rate(config: Config, n_sampled_negatives: int) -> tuple[float, dict
 
     Positives are taken whole and negatives are subsampled, so the sample's base rate is an
     artifact of the draw. This is the number that undoes it.
+
+    Matched negatives are drawn from the cells that burned rather than from the whole pool, so
+    they are not a uniform sample of anything and cannot enter the offset. Only the uniform
+    part of the draw does; what the matched part does to the shape is left to the isotonic fit.
     """
     grid = pd.read_parquet(config.path(config.paths.grid_out))
     exclusions = pd.read_parquet(config.path(config.paths.exclusions_out))
     pool, days, blocked = negative_pool(grid, exclusions, config)
 
     population = len(pool) * len(days) - len(blocked)
+    matched = int(round(config.sampling.hard_negative_fraction * n_sampled_negatives))
+    uniform = n_sampled_negatives - matched
+
     counts = {
         "cells": len(pool),
         "days": len(days),
         "excluded_cell_days": len(blocked),
         "population_negatives": population,
         "sampled_negatives": n_sampled_negatives,
+        "matched_negatives": matched,
+        "uniform_negatives": uniform,
     }
-    return n_sampled_negatives / population, counts
+    return uniform / population, counts
 
 
 def isotonic_knots(
     labels: npt.NDArray[Any], probabilities: npt.NDArray[Any]
 ) -> tuple[list[float], list[float]]:
-    """The step function mapping a predicted probability to the frequency observed beside it."""
+    """The step function mapping a predicted probability to the frequency observed beside it.
+
+    Each pooled block is reported as `(positives + 0.5) / (size + 1)` rather than its raw
+    frequency, so a block of only positives lands below 1. An exact 1.0 survives the case-control
+    offset: the logit clips at `1 - _EPSILON`, which is +20.7, and an offset of about -9 leaves
+    it at 0.9999. The map then claims a cell will certainly burn, on the strength of a leaf
+    holding a handful of rows.
+
+    Damping a block on its own count is not monotone (a one-row block of a single negative gives
+    0.25, a hundred-row block at frequency 0.1 gives 0.104), so a running maximum restores the
+    ordering isotonic regression exists to produce. It cannot reintroduce a 1.0: every damped
+    value is strictly below it.
+    """
     from sklearn.isotonic import IsotonicRegression
 
     isotonic = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
-    isotonic.fit(probabilities, labels)
+    fitted = isotonic.fit_transform(probabilities, labels)
+
+    blocks, index = np.unique(fitted, return_inverse=True)
+    sizes = np.bincount(index, minlength=len(blocks))
+    hits = np.bincount(index, weights=np.asarray(labels, dtype="float64"), minlength=len(blocks))
+    damped = np.maximum.accumulate((hits + _DAMPING) / (sizes + 2 * _DAMPING))
+
     return (
         [float(value) for value in isotonic.X_thresholds_],
-        [float(value) for value in isotonic.y_thresholds_],
+        [float(value) for value in np.interp(isotonic.y_thresholds_, blocks, damped)],
     )
 
 

@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 import pandas as pd
 import pytest
 
 from tfire.config import Config
-from tfire.features.fwi import INDEX_NAMES, compute_fwi
+from tfire.features.fwi import (
+    INDEX_NAMES,
+    compute_fwi,
+    province_mean_fwi,
+    spring_reset_share,
+    validate_fwi,
+)
 
 N_CELLS = 2
 LATITUDES = np.full(N_CELLS, 46.0)
@@ -94,3 +102,31 @@ def test_wetting_rain_pulls_the_drought_code_down() -> None:
 def test_latitudes_must_match_the_backbone(n_latitudes: int) -> None:
     with pytest.raises(ValueError, match="backbone cells"):
         compute_fwi(daily_table(n_years=1), np.full(n_latitudes, 46.0))
+
+
+@pytest.mark.parametrize(
+    ("rain_mm", "expected"), [(20.0, 1.0), (0.0, 0.0)], ids=["wetted down", "ratcheting"]
+)
+def test_spring_reset_share_separates_a_resetting_code_from_a_ratcheting_one(
+    rain_mm: float, expected: float
+) -> None:
+    fwi = compute_fwi(daily_table(rain_mm=rain_mm), LATITUDES)
+
+    assert spring_reset_share(fwi, _STARTUP_DC) == pytest.approx(expected)
+
+
+def test_an_inflated_province_mean_is_reported(
+    config: Config, caplog: pytest.LogCaptureFixture
+) -> None:
+    fwi = compute_fwi(daily_table(rain_mm=20.0), LATITUDES)
+    assert province_mean_fwi(fwi).max() < config.fwi.max_mean_fwi
+
+    with caplog.at_level(logging.ERROR, logger="tfire.features.fwi"):
+        validate_fwi(fwi, config)
+    assert not [record for record in caplog.records if "province-wide" in record.message]
+
+    inflated = fwi.assign(fwi=fwi["fwi"] * 100.0)
+    caplog.clear()
+    with caplog.at_level(logging.ERROR, logger="tfire.features.fwi"):
+        validate_fwi(inflated, config)
+    assert [record for record in caplog.records if "province-wide" in record.message]

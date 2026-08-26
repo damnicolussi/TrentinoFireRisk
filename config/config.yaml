@@ -32,6 +32,9 @@ paths:
   era5_weights_out: "data/interim/era5_weights.parquet"
   meteo_out: "data/interim/meteo_daily.parquet"
   fwi_out: "data/interim/fwi.parquet"
+  bias_map_out: "data/interim/bias_map.parquet"
+  fire_history_out: "data/interim/fire_history.parquet"
+  climatology_out: "data/interim/climatology.parquet"
   landsat_raw: "data/raw/landsat"
   vegetation_out: "data/interim/vegetation.parquet"
   vegetation_climatology_out: "data/interim/vegetation_climatology.parquet"
@@ -50,6 +53,11 @@ paths:
   forecast_cache: "data/raw/forecast"
   operational_dir: "data/interim/operational"
   risk_dir: "data/processed/risk"
+  overlay_dir: "data/processed/risk/overlays"
+  jobs_dir: "data/processed/jobs"
+  app_state_out: "data/processed/app_state.json"
+  runtime_manifest_out: "data/processed/runtime_manifest.json"
+  frontend_dir: "app/frontend"
   report_dir: "reports"
   figures_dir: "reports/figures"
 
@@ -137,6 +145,8 @@ meteo:
     - "total_precipitation"
     - "10m_u_component_of_wind"
     - "10m_v_component_of_wind"
+    - "volumetric_soil_water_layer_1"
+    - "volumetric_soil_water_layer_2"
 
   # Trentino runs on UTC+1 standard time. Fire weather is defined on local standard time,
   # so a day spans 23:00 UTC to 23:00 UTC and noon LST is the 11:00 UTC record.
@@ -146,10 +156,12 @@ meteo:
   # history at 1984-01-01 and lets DC and DMC settle before the first emitted day.
   spinup_years: 1
 
+  extension_end: 2026-06-30
+
   # Earth Engine returns 503 past 8 concurrent downloads, and `getDownloadURL` refuses more
-  # than 1024 bands, which 168 hours x 6 variables sits just under.
+  # than 1024 bands, which 120 hours x 8 variables sits just under.
   gee_workers: 8
-  gee_window_hours: 168
+  gee_window_hours: 120
 
   precip_windows: [7, 15, 30]
   temp_window_days: 3
@@ -162,6 +174,40 @@ meteo:
   max_pressure_hpa: 1060.0
   max_precip_mm: 500.0
 
+history:
+  # how far an ignition is taken to say something about its neighbourhood. 2.5 km is five
+  # cells, wide enough that 0.13 events per cell becomes a readable field and narrow enough
+  # that a valley's history does not leak over the ridge into the next one.
+  bandwidth_m: 2500
+
+  # years of cadastre behind each target year. The whole record would let the 1980s decide a
+  # 2026 map.
+  window_years: 15
+
+climatology:
+  # read as a percentile inside the cell's own distribution for the calendar month. The raw
+  # value says how dry it is, the anomaly says how dry it is for here in August, and a model
+  # given only the first learns the province's geography instead of the day's weather.
+  columns:
+    - "fwi"
+    - "precip_cum30"
+
+bias:
+  # Open-Meteo serves the wind from ERA5 at 0.25 degrees while the backbone is ERA5-Land at
+  # 0.1, and over this terrain the coarser grid runs 36% high on the daily mean and 40% on the
+  # maximum. Temperature and humidity come off ERA5-Land on both paths and agree to three decimals;
+  # pressure and precipitation move by under 3%. Only the wind is corrected, and the direction
+  # columns are left alone: they are circular, and a quantile map on a compass bearing is meaningless.
+  columns:
+    - "wind_speed_mean"
+    - "wind_speed_max"
+    - "wind_speed_noon"
+
+  # the overlap the two distributions are compared on. Long enough for a per-cell, per-month
+  # quantile to stand on more than a handful of days, recent enough to be the same ERA5 stream
+  # the operational path serves today.
+  reference_years: [2020, 2024]
+
 fwi:
   # ceilings for the plausibility check. FFMC is bounded at 101 by construction; the
   # others are open-ended, so these are what a 41-year alpine record should stay under.
@@ -171,6 +217,18 @@ fwi:
   max_isi: 200.0
   max_bui: 1000.0
   max_fwi: 200.0
+
+  # the per-value ceilings above sit far enough from the record that a systematic inflation
+  # would pass under them. The province-wide daily mean is the quantity that catches one:
+  # it peaks at 15.4 over the whole record, in August 2003, so 30 leaves room for a hotter
+  # August than any on file and still fails on a doubling.
+  max_mean_fwi: 30.0
+
+  # DC returns to near zero every spring on winter rain rather than on a seasonal mask.
+  # Alpine winters are wet enough that 98.6% of cell-years fall under the start-up value of
+  # 15 at some point in March or April; a DC that integrated without resetting would not.
+  spring_reset_dc: 15.0
+  min_spring_reset_share: 0.95
 
 vegetation:
   # Collection 2 Tier-1 Level-2 surface reflectance. Five sensors are needed to span 1984-2024.
@@ -233,8 +291,9 @@ sampling:
   negative_ratio: 10
 
   # level-3 exclusion around each burned polygon, in cells and in days. 1 cell is 500 m:
-  # 168,709 excluded (cell, date) pairs, 164,099 of them inside the burnable active pool of
-  # 340,359,552. The rest fall on cells a negative could not have been drawn from anyway.
+  # 168,709 excluded (cell, date) pairs, 166,252 of them on an active cell and inside the
+  # window. That subset is what the case-control offset takes off 24,842 x 14,976, leaving
+  # 371,867,540 candidate negatives. The rest fall where a negative could not be drawn anyway.
   buffer_cells: 1
   buffer_days: 2
 
@@ -261,9 +320,15 @@ mesogeos:
 
 trentino:
   # artifacts land in models/trentino/<version>/.
-  version: "v1"
+  version: "v2"
 
   test_years_start: 2015
+
+  # cut points of the danger classes the map legend shows, as percentiles of the calibrated
+  # probability over the whole grid, every stride-th day of the holdout years. A whole-grid
+  # reference rather than the sampled negatives: it is the population the map actually draws.
+  danger_percentiles: [90.0, 99.0, 99.9, 99.99]
+  danger_reference_stride: 1
 
   cv_folds: 5
 
@@ -293,6 +358,10 @@ evaluation:
   spatial_block_m: 20000
   spatial_folds: 5
 
+  # resamples behind the 95% intervals on the holdout scores. 276 positives is few enough that
+  # differences of a few thousandths need the interval to be read at all.
+  bootstrap_resamples: 1000
+
   shap_max_display: 20
   figure_dpi: 300
 
@@ -301,7 +370,7 @@ evaluation:
 
 dataset:
   expected_rows: 34705
-  expected_features: 137
+  expected_features: 139
 
 forecast:
   archive_url: "https://archive-api.open-meteo.com/v1/archive"
@@ -340,7 +409,56 @@ forecast:
   batch_size: 64
 
   request_timeout_s: 120
-  retry_attempts: 3
+
+  # waits go 2, 4, 8, 16, 32 seconds, so six attempts span more than the minute Open-Meteo's
+  # minutely quota takes to clear.
+  retry_attempts: 6
+
+app:
+  host: "127.0.0.1"
+  port: 8000
+
+  # a date with no risk map on disk is predicted while the request waits. Turning this off makes
+  # the API serve only what `tfire predict` has already written.
+  on_demand: true
+
+  # the grid is 234 x 196 cells, so the warped overlay is already under this. The cap exists so a
+  # future finer grid cannot produce a PNG nobody can download.
+  overlay_max_px: 2048
+  overlay_opacity: 0.75
+
+  session_ttl_minutes: 240
+  default_language: "it"
+
+  # min_zoom 8 puts the whole province in a desktop viewport; past 15 the 500 m cells are just
+  # large squares over a basemap that keeps getting sharper, which reads as more precision than
+  # the data has.
+  min_zoom: 8
+  max_zoom: 15
+  bounds_margin_deg: 0.15
+
+  # offsets from today, inclusive. These dates are kept on disk and are never evicted.
+  warm_window_days: [-30, 10]
+
+  cache_max_gb: 5.0
+
+  # 0 disables the limit, which is what browsing the record needs: stepping day by day through
+  # 1984-2024 hits far more than a handful of uncached dates in an hour.
+  uncached_requests_per_hour: 0
+
+  login_attempts_per_hour: 10
+  job_log_tail_lines: 200
+
+  basemaps:
+    - key: "osm"
+      url: "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+      attribution: "© OpenStreetMap contributors"
+    - key: "satellite"
+      url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+      attribution: "Esri, Maxar, Earthstar Geographics"
+    - key: "relief"
+      url: "https://tile.opentopomap.org/{z}/{x}/{y}.png"
+      attribution: "© OpenTopoMap (CC-BY-SA), © OpenStreetMap contributors"
 
 logging:
   level: "INFO"

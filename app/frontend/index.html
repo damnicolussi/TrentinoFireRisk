@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trentino Fire Risk</title>
+<link rel="icon" href="assets/favicon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32x32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="assets/favicon-16x16.png">
+<link rel="apple-touch-icon" sizes="180x180" href="assets/apple-touch-icon.png">
+<link rel="manifest" href="assets/site.webmanifest">
+<meta name="theme-color" content="#720000">
+<link rel="stylesheet" href="vendor/leaflet.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="topbar">
+  <a class="brand" href="#map" data-view="map">
+    <img class="brand-mark" src="assets/logo-white.png" alt="" aria-hidden="true">
+    <span class="brand-name">Trentino Fire Risk</span>
+  </a>
+
+  <div class="topbar-tools">
+    <div class="datebar" id="datebar">
+      <button type="button" id="day-prev" class="step" title="" aria-label="">&#9664;</button>
+      <input type="text" id="day" inputmode="numeric" autocomplete="off" spellcheck="false"
+             aria-label="" placeholder="">
+      <button type="button" id="day-pick" class="step pick" title="" aria-label="">
+        <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+          <rect x="1.5" y="3" width="13" height="11.5" rx="1"></rect>
+          <path d="M1.5 6.5h13M5 1.5v3M11 1.5v3"></path>
+        </svg>
+      </button>
+      <button type="button" id="day-next" class="step" title="" aria-label="">&#9654;</button>
+      <button type="button" id="day-today" class="ghost" data-i18n="today"></button>
+      <div class="calendar" id="calendar" hidden></div>
+    </div>
+
+    <a class="navlink" href="#about" data-view="about" data-i18n="nav_about"></a>
+
+    <div class="lang" role="group">
+      <button type="button" data-lang="it">IT</button>
+      <button type="button" data-lang="en">EN</button>
+    </div>
+
+    <button type="button" id="admin-open" class="ghost" data-i18n="sign_in"></button>
+  </div>
+</nav>
+
+<p class="disclaimer" id="disclaimer" data-i18n="disclaimer"></p>
+
+<main>
+  <section id="view-map" class="view">
+    <div id="map"></div>
+
+    <div class="panel panel-layers">
+      <div class="segmented" id="basemaps"></div>
+      <fieldset class="options">
+        <label><input type="radio" name="palette" value="classes" checked>
+          <span data-i18n="palette_classes"></span></label>
+        <label><input type="radio" name="palette" value="rank">
+          <span data-i18n="palette_rank"></span></label>
+      </fieldset>
+      <fieldset class="options">
+        <label><input type="checkbox" id="show-fires">
+          <span><span data-i18n="layer_fires"></span>
+            <span class="tally" id="fires-tally"></span></span></label>
+      </fieldset>
+      <div class="slider">
+        <label for="opacity" data-i18n="opacity"></label>
+        <input type="range" id="opacity" min="0" max="100" step="5">
+        <output id="opacity-value"></output>
+      </div>
+    </div>
+
+    <div class="panel panel-legend">
+      <h2 data-i18n="legend_title"></h2>
+      <table id="legend"><tbody></tbody></table>
+      <button type="button" class="link" id="legend-all" data-i18n="show_all"></button>
+      <p class="footnote" id="legend-note"></p>
+    </div>
+
+    <div class="panel panel-detail" id="detail" hidden>
+      <button type="button" class="close" id="detail-close" aria-label="close">&times;</button>
+      <h2 id="detail-title"></h2>
+      <p class="coords" id="detail-coords"></p>
+      <table class="readout" id="detail-risk"></table>
+      <h3 data-i18n="drivers"></h3>
+      <table class="readout" id="detail-drivers"></table>
+    </div>
+
+    <div class="corner">
+      <p class="status" id="status" hidden></p>
+      <p class="provenance" id="provenance"></p>
+    </div>
+  </section>
+
+  <section id="view-about" class="view" hidden>
+    <article class="page">
+      <h1 data-i18n="about_title"></h1>
+      <p class="lede" data-i18n="about_lede"></p>
+
+      <div class="figures" id="about-numbers"></div>
+
+      <h2 data-i18n="about_how_title"></h2>
+      <p data-i18n="about_how_body"></p>
+      <div class="pipeline" id="pipeline"></div>
+
+      <h2 data-i18n="about_data_title"></h2>
+      <p data-i18n="about_data_body"></p>
+      <div class="table-scroll">
+        <table class="grid" id="about-sources">
+          <thead><tr>
+            <th data-i18n="col_family"></th>
+            <th data-i18n="col_source"></th>
+            <th data-i18n="col_period"></th>
+            <th data-i18n="col_resolution"></th>
+            <th data-i18n="col_features"></th>
+            <th data-i18n="col_license"></th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <h2 data-i18n="about_model_title"></h2>
+      <p data-i18n="about_model_body"></p>
+      <table class="grid" id="about-metrics">
+        <thead><tr>
+          <th data-i18n="col_model"></th>
+          <th data-i18n="col_auprc"></th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="plates">
+        <figure><img src="/api/figures/pr_curves.png" alt="">
+          <figcaption data-i18n="fig_pr"></figcaption></figure>
+        <figure><img src="/api/figures/shap_categories.png" alt="">
+          <figcaption data-i18n="fig_shap"></figcaption></figure>
+      </div>
+
+      <footer class="colophon">
+        <p class="who">Damiano Nicolussi<br><span data-i18n="colophon_affiliation"></span></p>
+        <p data-i18n="colophon_data"></p>
+        <p><span data-i18n="colophon_code"></span>
+          <a href="https://github.com/damnicolussi/TrentinoFireRisk" rel="noreferrer"
+             >github.com/damnicolussi/TrentinoFireRisk</a></p>
+      </footer>
+    </article>
+  </section>
+</main>
+
+<div class="modal" id="admin-modal" hidden>
+  <form class="dialog" id="admin-login">
+    <h2 data-i18n="sign_in"></h2>
+    <p class="footnote" data-i18n="sign_in_hint"></p>
+    <label for="admin-password" data-i18n="password"></label>
+    <input type="password" id="admin-password" autocomplete="current-password" required>
+    <p class="error" id="admin-error" hidden></p>
+    <div class="dialog-actions">
+      <button type="button" class="ghost" id="admin-cancel" data-i18n="cancel"></button>
+      <button type="submit" class="primary" data-i18n="sign_in"></button>
+    </div>
+  </form>
+</div>
+
+<aside class="drawer" id="admin-drawer" hidden>
+  <header>
+    <h2 data-i18n="admin_title"></h2>
+    <button type="button" class="close" id="admin-close" aria-label="close">&times;</button>
+  </header>
+
+  <h3 data-i18n="admin_freshness"></h3>
+  <table class="readout" id="admin-status"></table>
+
+  <h3 data-i18n="admin_versions"></h3>
+  <div class="row">
+    <select id="admin-version"></select>
+    <button type="button" class="ghost" id="admin-version-apply" data-i18n="apply"></button>
+  </div>
+
+  <h3 data-i18n="admin_jobs"></h3>
+  <div class="actions" id="admin-actions"></div>
+  <pre class="log" id="admin-log"></pre>
+
+  <button type="button" class="ghost wide" id="admin-logout" data-i18n="sign_out"></button>
+</aside>
+
+<script src="vendor/leaflet.js"></script>
+<script src="strings.js"></script>
+<script src="about.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

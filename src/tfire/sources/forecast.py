@@ -41,6 +41,8 @@ FIELD_BY_VARIABLE: Final[dict[str, str]] = {
     "precipitation": "precip_mm",
     "wind_speed_10m": "wind_speed",
     "wind_direction_10m": "wind_dir",
+    "soil_moisture_0_to_7cm": "soil_water_l1",
+    "soil_moisture_7_to_28cm": "soil_water_l2",
 }
 
 # how far a returned point may sit from the one asked for. Every model snaps to its own grid,
@@ -49,7 +51,7 @@ FIELD_BY_VARIABLE: Final[dict[str, str]] = {
 _SNAP_TOLERANCE_DEG: Final = 0.5
 
 _RETRY_WAIT_MULTIPLIER_S: Final = 2
-_RETRY_WAIT_MAX_S: Final = 60
+_RETRY_WAIT_MAX_S: Final = 75
 
 
 class ForecastError(RuntimeError):
@@ -97,6 +99,22 @@ def window(config: Config, provider: Provider, today: date) -> tuple[date, date]
     )
 
 
+def _month_start(day: date) -> date:
+    return day.replace(day=1)
+
+
+def _month_end(day: date) -> date:
+    following = _month_start(day) + timedelta(days=32)
+    return _month_start(following) - timedelta(days=1)
+
+
+def spinup_window(config: Config, first: date, last: date, today: date) -> tuple[date, date]:
+    """The span to actually download so that `[first, last]` has its spin-up."""
+    start = _month_start(first - timedelta(days=config.forecast.spinup_days))
+    horizon = today + timedelta(days=config.forecast.horizon_days)
+    return start, min(_month_end(last), horizon)
+
+
 def _cache_path(
     config: Config, spot: Endpoint, start: date, end: date, digest: str, today: date
 ) -> Path:
@@ -140,13 +158,12 @@ def _request_digest(query: dict[str, str]) -> str:
 
 def _get(spot: Endpoint, params: dict[str, str], config: Config) -> list[dict[str, Any]]:
     try:
-        response = requests.get(
-            spot.url, params=params, timeout=config.forecast.request_timeout_s
-        )
+        response = requests.get(spot.url, params=params, timeout=config.forecast.request_timeout_s)
     except requests.RequestException as error:
         raise _RetryableError(f"{spot.url} unreachable: {error}") from error
 
-    if response.status_code >= 500:
+    # 429 is Open-Meteo's own minutely quota, which clears on its own
+    if response.status_code >= 500 or response.status_code == 429:
         raise _RetryableError(f"{spot.url} returned {response.status_code}")
     if not response.ok:
         # Open-Meteo puts the actual complaint in the body, which is far more useful than the code

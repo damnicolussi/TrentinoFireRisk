@@ -82,6 +82,46 @@ def scores(labels: npt.NDArray[Any], probabilities: npt.NDArray[Any]) -> dict[st
     }
 
 
+def bootstrap_scores(
+    labels: npt.NDArray[Any],
+    probabilities: npt.NDArray[Any],
+    n_resamples: int,
+    seed: int,
+    level: float = 0.95,
+) -> dict[str, dict[str, float]]:
+    """Percentile confidence intervals for AUPRC, AUROC and lift, by resampling rows.
+
+    Resampling is over rows rather than over positives alone, so the interval carries the
+    uncertainty in the base rate as well: lift is defined against a rate the resample moves.
+    A draw with no positive at all is discarded, since neither metric is defined on it.
+    """
+    from sklearn.metrics import average_precision_score, roc_auc_score
+
+    rng = np.random.default_rng(seed)
+    n = len(labels)
+    drawn: dict[str, list[float]] = {"auprc": [], "auroc": [], "lift": []}
+    for _ in range(n_resamples):
+        rows = rng.integers(0, n, size=n)
+        taken, scored = labels[rows], probabilities[rows]
+        rate = float(taken.mean())
+        if rate in (0.0, 1.0):
+            continue
+        auprc = float(average_precision_score(taken, scored))
+        drawn["auprc"].append(auprc)
+        drawn["auroc"].append(float(roc_auc_score(taken, scored)))
+        drawn["lift"].append(auprc / rate)
+
+    tail = 100 * (1 - level) / 2
+    return {
+        metric: {
+            "lo": float(np.percentile(values, tail)),
+            "hi": float(np.percentile(values, 100 - tail)),
+            "resamples": len(values),
+        }
+        for metric, values in drawn.items()
+    }
+
+
 def precision_at_k(
     labels: npt.NDArray[Any], probabilities: npt.NDArray[Any], fractions: Sequence[float]
 ) -> list[dict[str, float]]:

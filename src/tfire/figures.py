@@ -40,6 +40,11 @@ DASHES = ("-", "--", "-.", ":", (0, (3, 1, 1, 1, 1, 1)))
 MODEL_LABELS = {
     "xgboost": "XGBoost",
     "xgboost_no_stacking": "XGBoost, no stacking",
+    "xgboost_baseline": "Coordinates as the spatial prior",
+    "xgboost_no_xy": "No coordinates",
+    "xgboost_no_xy_hist": "Ignition density instead",
+    "xgboost_no_xy_hist_anom": "Density and climatology anomalies",
+    "xgboost_no_xy_hist_mono": "Density, monotone constraints",
     "random_forest": "Random forest",
     "logistic": "Logistic regression",
     "fwi_only": "FWI only",
@@ -87,6 +92,7 @@ def _save(figure: Figure, config: Config, name: str) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"{name}.png"
     figure.savefig(path, dpi=config.evaluation.figure_dpi, bbox_inches="tight")
+    figure.savefig(directory / f"{name}.pdf", bbox_inches="tight")
     plt.close(figure)
     return path
 

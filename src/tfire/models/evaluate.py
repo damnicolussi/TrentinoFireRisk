@@ -13,9 +13,11 @@ import pandas as pd
 
 from tfire import figures, sensitivity
 from tfire.config import Config
-from tfire.evaluation import precision_at_k, scores, spatial_folds
+from tfire.evaluation import bootstrap_scores, precision_at_k, scores, spatial_folds
 from tfire.features.registry import load_registry
 from tfire.models import calibration
+from tfire.models.danger import build_danger_classes
+from tfire.models.events import verify_events
 from tfire.models.explain import attribute
 from tfire.models.trentino import (
     METRICS_FILENAME,
@@ -166,6 +168,15 @@ def evaluate_trentino(
     pooled = scores(labels[train], fitted.out_of_fold)
 
     probabilities = baseline_probabilities(features, labels, train, config, tuning, fitted.holdout)
+    intervals = {
+        name: bootstrap_scores(
+            labels[~train],
+            scored,
+            config.evaluation.bootstrap_resamples,
+            config.project.random_seed,
+        )
+        for name, scored in probabilities.items()
+    }
     spatial = spatial_cross_validation(spec, features, labels, frame, train, config, tuning)
 
     calibrator = calibration.fit(
@@ -177,16 +188,19 @@ def evaluate_trentino(
     explained = attribute(fitted.estimator, features.loc[~train][fitted.columns], registry, frame)
 
     results: dict[str, Any] = {}
+    ablation: dict[str, Any] = {}
     if variants:
         results = sensitivity.run(
             config, sensitivity.resolve(variants), tuning, metrics["models"][PRIMARY]
         )
+        ablation = sensitivity.run_block_ablation(config, tuning, metrics["models"][PRIMARY])
 
     evaluation = {
         "version": config.trentino.version,
         "rows": {"train": int(train.sum()), "holdout": int((~train).sum())},
         "pooled_out_of_fold": pooled,
         "holdout": holdout,
+        "holdout_intervals": intervals,
         "folds": fitted.fold_scores,
         "precision_at_k": {
             "pooled_out_of_fold": precision_at_k(
@@ -210,6 +224,7 @@ def evaluate_trentino(
             "per_temporal": explained.per_temporal.to_dict("records"),
         },
         "sensitivity": results,
+        "block_ablation": ablation,
         "random_seed": config.project.random_seed,
         "config_sha256": config.digest(),
     }
@@ -226,6 +241,9 @@ def evaluate_trentino(
         written.append(sensitivity_figure)
 
     calibrator.write(directory / calibration.CALIBRATOR_FILENAME)
+    classes = build_danger_classes(config, force=True)
+    evaluation["event_verification"] = verify_events(config, classes)
+
     out.write_text(json.dumps(evaluation, indent=2), encoding="utf-8")
     report = render_report(evaluation, metrics, written, config)
 

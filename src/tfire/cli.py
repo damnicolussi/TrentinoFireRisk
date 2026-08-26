@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -15,13 +16,17 @@ from tfire.features import EXTRACTORS
 from tfire.features.vegetation import refresh_landsat
 from tfire.fires import build_positives
 from tfire.grid import build_grid
-from tfire.inference import FeatureUnavailableError, predict_days
+from tfire.inference import FeatureUnavailableError, model_directory, predict_days
+from tfire.models.danger import build_danger_classes
 from tfire.models.evaluate import evaluate_trentino
+from tfire.models.events import EVENTS_FILENAME, verify_events
 from tfire.models.mesogeos import train_mesogeos
 from tfire.models.trentino import SPECS, train_trentino
+from tfire.packaging import package_runtime
 from tfire.preflight import CHECKS, check_access
 from tfire.sampling import build_samples
 from tfire.sensitivity import VARIANTS
+from tfire.sources.bias import fit_bias_map
 from tfire.sources.era5land import fetch_era5, fetch_years
 from tfire.sources.landsat import fetch_landsat
 
@@ -243,6 +248,87 @@ def predict_command(
     except FeatureUnavailableError as error:
         logger.error("%s", error)
         raise typer.Exit(code=1) from error
+
+
+@app.command("danger-classes")
+def danger_classes_command(config: ConfigOption = None, force: ForceOption = False) -> None:
+    """Derive the absolute danger-class breaks the map legend uses."""
+    build_danger_classes(_start(config), force=force)
+
+
+@app.command("fit-bias-map")
+def fit_bias_map_command(config: ConfigOption = None, force: ForceOption = False) -> None:
+    """Fit the quantile map that puts remotely served fields back on the backbone."""
+    fit_bias_map(_start(config), force=force)
+
+
+@app.command("verify-events")
+def verify_events_command(config: ConfigOption = None) -> None:
+    """Score every day that carries a recorded ignition and report where the ignitions landed."""
+    cfg = _start(config)
+    report = verify_events(cfg)
+
+    path = model_directory(cfg) / EVENTS_FILENAME
+    path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+
+    overall = report["overall"]
+    logger.info(
+        "%d ignition(s): median within-day percentile %.3f, %.1f%% at or above the 90th",
+        overall["events"],
+        overall["median_percentile"],
+        100 * overall["share_at_or_above_90"],
+    )
+    logger.info(
+        "Cell effect carries %.1f%% of the log10(p) variance",
+        100 * float(report["cell_effect_variance_share"]),
+    )
+    logger.info("Wrote %s", path)
+
+
+@app.command("serve")
+def serve_command(
+    config: ConfigOption = None,
+    host: Annotated[str | None, typer.Option("--host", help="Interface to bind.")] = None,
+    port: Annotated[int | None, typer.Option("--port", help="Port to bind.")] = None,
+    reload: Annotated[bool, typer.Option("--reload", help="Restart on a source change.")] = False,
+) -> None:
+    """Run the web application."""
+    import uvicorn
+
+    from tfire.api import create_app
+
+    cfg = _start(config)
+    uvicorn.run(
+        "tfire.api:create_app" if reload else create_app(cfg),
+        factory=reload,
+        host=host or cfg.app.host,
+        port=port or cfg.app.port,
+        reload=reload,
+        workers=1,
+    )
+
+
+@app.command("admin-password")
+def admin_password_command() -> None:
+    """Hash an admin password and print the environment line to store it in."""
+    from tfire.api.auth import PASSWORD_ENV, hash_password
+
+    secret = typer.prompt("Admin password", hide_input=True, confirmation_prompt=True)
+    typer.echo(f"\n{PASSWORD_ENV}={hash_password(secret)}\n")
+    typer.echo("Put that line in .env, which is git-ignored. The password itself is not stored.")
+
+
+@app.command("package-runtime")
+def package_runtime_command(
+    config: ConfigOption = None,
+    out: Annotated[
+        Path, typer.Option("--out", help="Directory to assemble the runtime subset in.")
+    ] = Path("dist/runtime"),
+    force: ForceOption = False,
+) -> None:
+    """Assemble the data a serving container needs, and nothing the build needs."""
+    cfg = _start(config)
+    package_runtime(cfg, cfg.path(out), force=force)
 
 
 @app.command("check-access")

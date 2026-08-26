@@ -18,6 +18,10 @@ logger = logging.getLogger(__name__)
 _STRICT = ConfigDict(extra="forbid")
 _REFERENCE = "config:"
 
+# category-level keys that describe the source rather than the columns, so they are kept off
+# the per-column specs
+_PROVENANCE = ("provider", "period", "resolution", "license", "url")
+
 Referable = float | int | bool | str | None
 
 
@@ -54,11 +58,31 @@ class FeatureSpec(BaseModel):
         )
 
 
+class CategorySpec(BaseModel):
+    """Where a family of features comes from. Provenance, not modeling metadata."""
+
+    model_config = _STRICT
+
+    name: str
+    source: str
+    role: Literal["key", "label", "feature", "diagnostic"] = "feature"
+    temporal: Literal["static", "dynamic"] | None = None
+    provider: str | None = None
+    period: str | None = None
+    resolution: str | None = None
+    license: str | None = None
+    url: str | None = None
+    columns: int = 0
+
+
 class Registry:
     """The declared columns of the training table, in file order."""
 
-    def __init__(self, specs: Sequence[FeatureSpec]) -> None:
+    def __init__(
+        self, specs: Sequence[FeatureSpec], categories: Sequence[CategorySpec] = ()
+    ) -> None:
         self.specs = tuple(specs)
+        self.categories = tuple(categories)
 
     @property
     def features(self) -> tuple[FeatureSpec, ...]:
@@ -69,13 +93,25 @@ class Registry:
         return tuple(spec for spec in self.features if spec.name in frame.columns)
 
 
-def _flatten(raw: dict[str, Any]) -> Iterator[FeatureSpec]:
+def _flatten(raw: dict[str, Any]) -> Iterator[tuple[CategorySpec, list[FeatureSpec]]]:
     for category, block in raw["categories"].items():
         defaults = dict(block)
         columns = defaults.pop("columns")
-        for name, overrides in columns.items():
-            merged = {**defaults, **(overrides or {})}
-            yield FeatureSpec(name=name, category=category, **merged)
+        provenance = {key: defaults.pop(key) for key in _PROVENANCE if key in defaults}
+
+        specs = [
+            FeatureSpec(name=name, category=category, **{**defaults, **(overrides or {})})
+            for name, overrides in columns.items()
+        ]
+        described = CategorySpec(
+            name=category,
+            source=defaults["source"],
+            role=defaults.get("role", "feature"),
+            temporal=defaults.get("temporal"),
+            columns=len(specs),
+            **provenance,
+        )
+        yield described, specs
 
 
 def load_registry(path: Path | None = None) -> Registry:
@@ -87,7 +123,9 @@ def load_registry(path: Path | None = None) -> Registry:
     with registry_path.open(encoding="utf-8") as handle:
         raw: dict[str, Any] = yaml.safe_load(handle)
 
-    specs = list(_flatten(raw))
+    categories, blocks = zip(*_flatten(raw), strict=True)
+    specs = [spec for block in blocks for spec in block]
+
     names = [spec.name for spec in specs]
     duplicates = sorted({name for name in names if names.count(name) > 1})
     if duplicates:
@@ -97,7 +135,7 @@ def load_registry(path: Path | None = None) -> Registry:
     if missing:
         raise ValueError(f"Features without a `temporal` in {registry_path}: {missing}")
 
-    return Registry(specs)
+    return Registry(specs, categories)
 
 
 def validate_frame(frame: pd.DataFrame, registry: Registry, config: Config) -> None:

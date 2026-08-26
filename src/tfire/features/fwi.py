@@ -20,6 +20,8 @@ _XCLIM_ORDER: Final = ("dc", "dmc", "ffmc", "isi", "bui", "fwi")
 
 INDEX_NAMES: Final = ("fwi", "ffmc", "dmc", "dc", "isi", "bui")
 
+_SPRING_MONTHS: Final = (3, 4)
+
 # units of the four noon inputs as `meteo_daily.parquet` stores them; xclim converts from here
 _INPUT_UNITS: Final[dict[str, str]] = {
     "temp_noon": "degC",
@@ -104,28 +106,52 @@ def validate_fwi(fwi: pd.DataFrame, config: Config) -> None:
         else:
             logger.info("%s: [%.1f, %.1f]", name, values.min(), values.max())
 
-    boundary, interior = _year_boundary_jump(fwi)
-    if boundary > interior:
+    peak = float(province_mean_fwi(fwi).max())
+    if peak > config.fwi.max_mean_fwi:
         logger.error(
-            "DC moves by up to %.1f on 1 January against %.1f the rest of the year, "
-            "which is a seasonal restart",
-            boundary,
-            interior,
+            "province-wide daily mean FWI peaks at %.1f, above the ceiling of %g",
+            peak,
+            config.fwi.max_mean_fwi,
+        )
+    else:
+        logger.info("province-wide daily mean FWI peaks at %.1f", peak)
+
+    share = spring_reset_share(fwi, config.fwi.spring_reset_dc)
+    if share < config.fwi.min_spring_reset_share:
+        logger.error(
+            "DC falls below %g in March or April in only %.1f%% of cell-years, "
+            "against the %.1f%% expected of a code that resets on winter rain",
+            config.fwi.spring_reset_dc,
+            100 * share,
+            100 * config.fwi.min_spring_reset_share,
         )
     else:
         logger.info(
-            "DC continuity: largest 1 January step %.1f, largest step elsewhere %.1f",
-            boundary,
-            interior,
+            "DC falls below %g by April in %.1f%% of cell-years",
+            config.fwi.spring_reset_dc,
+            100 * share,
         )
 
 
-def _year_boundary_jump(fwi: pd.DataFrame) -> tuple[float, float]:
-    """Largest day-over-day DC move at the year boundary, and away from it."""
-    frame = fwi.sort_values(["era5_id", "date"])
-    delta = frame.groupby("era5_id")["dc"].diff().abs()
-    boundary = frame["date"].dt.dayofyear == 1
-    return float(delta[boundary].max()), float(delta[~boundary].max())
+def province_mean_fwi(fwi: pd.DataFrame) -> pd.Series:
+    """FWI averaged over the backbone, one value per day."""
+    mean: pd.Series = fwi.groupby("date")["fwi"].mean()
+    return mean
+
+
+def spring_reset_share(fwi: pd.DataFrame, ceiling: float) -> float:
+    """Fraction of cell-years whose DC drops under `ceiling` in March or April.
+
+    The codes run year-round with no seasonal mask, so nothing resets DC by the calendar.
+    What resets it here is winter rain, and this is the measurement of that: a DC that
+    integrated without ever being wetted down would stay above the start-up value.
+    """
+    spring = fwi.loc[fwi["date"].dt.month.isin(_SPRING_MONTHS)]
+    if spring.empty:
+        raise ValueError("The table carries no March or April day to check the DC reset on")
+
+    lowest = spring.groupby([spring["date"].dt.year, spring["era5_id"]])["dc"].min()
+    return float((lowest < ceiling).mean())
 
 
 def extract_fwi(config: Config, force: bool = False) -> pd.DataFrame:

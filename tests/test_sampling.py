@@ -82,12 +82,13 @@ def test_the_two_exclusion_levels_cover_the_polygon_and_its_ring(
     assert int((exclusions["level"] == LEVEL_POLYGON).sum()) == 3
 
 
-def test_no_negative_lands_on_an_excluded_or_unusable_cell(config: Config) -> None:
+def test_no_negative_lands_on_an_excluded_or_inactive_cell(config: Config) -> None:
+    """The pool is the whole active grid, non-burnable cells included."""
     cfg = tuned(config)
     grid = synthetic_grid(active=set(range(10)), non_burnable={3, 4})
     days = pd.date_range(cfg.date_range.start, cfg.date_range.end)
 
-    # cells 0, 1, 2 and 5 are excluded outright, leaving 6, 7, 8 and 9 usable
+    # cells 0, 1, 2 and 5 are excluded outright, leaving 3, 4, 6, 7, 8 and 9 usable
     blocked = [0, 1, 2, 5]
     exclusions = pd.DataFrame(
         {
@@ -100,7 +101,7 @@ def test_no_negative_lands_on_an_excluded_or_unusable_cell(config: Config) -> No
     negatives = sample_negatives(grid, exclusions, 100, cfg, np.random.default_rng(0))
 
     assert len(negatives) == 100
-    assert set(negatives["cell_id"]) == {6, 7, 8, 9}
+    assert set(negatives["cell_id"]) == {3, 4, 6, 7, 8, 9}
     assert not negatives.duplicated().any()
     assert not (
         pd.MultiIndex.from_frame(negatives[["cell_id", "date"]])
@@ -109,7 +110,7 @@ def test_no_negative_lands_on_an_excluded_or_unusable_cell(config: Config) -> No
     )
 
     with pytest.raises(ValueError, match="available"):
-        sample_negatives(grid, exclusions, len(days) * 4 + 1, cfg, np.random.default_rng(0))
+        sample_negatives(grid, exclusions, len(days) * 6 + 1, cfg, np.random.default_rng(0))
 
 
 def test_the_seed_alone_decides_which_cell_days_are_drawn(config: Config) -> None:

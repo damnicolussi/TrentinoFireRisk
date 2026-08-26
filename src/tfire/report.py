@@ -56,6 +56,50 @@ def _widest(results: dict[str, Any], metric: str) -> float:
     return max(abs(float(block["delta"][f"holdout_{metric}"])) for block in results.values())
 
 
+def _event_rows(verification: dict[str, Any]) -> list[list[Any]]:
+    blocks = [("all", verification["overall"]), *sorted(verification["by_season"].items())]
+    return [
+        [
+            name,
+            block["events"],
+            f"{block['median_percentile']:.3f}",
+            f"{block['share_at_or_above_90']:.1%}",
+            f"{block['share_at_or_above_99']:.1%}",
+        ]
+        for name, block in blocks
+    ]
+
+
+def _event_section(verification: dict[str, Any]) -> list[str]:
+    years = verification["years"]
+    share = verification["cell_effect_variance_share"]
+    return [
+        "## Where recorded ignitions landed",
+        "",
+        f"Every cadastre ignition of {years[0]}-{years[1]} against the map its own day was "
+        "scored on, ranked within that day. A model that only knew where fires usually are "
+        "would put them near the middle of every day it is shown.",
+        "",
+        *table(
+            ("events", "n", "median percentile", "at or above 90th", "at or above 99th"),
+            _event_rows(verification),
+        ),
+        "",
+        *table(
+            ("class", "ignition cells"),
+            [[key, value] for key, value in verification["class_distribution"].items()],
+        ),
+        "",
+        f"Which cell a value belongs to explains {share:.1%} of the variance in log10(p) over "
+        f"{len(verification['variance_days'])} holdout days spread across the record, and "
+        f"{verification['cell_effect_variance_share_in_season']:.1%} over the "
+        f"{len(verification['season_window'])} consecutive August days at the end of it. The "
+        "second is the number an operator meets: inside one fire season the weather moves "
+        "little, so whatever is fixed about a cell is most of what separates two of them.",
+        "",
+    ]
+
+
 def render_report(
     evaluation: dict[str, Any],
     metrics: dict[str, Any],
@@ -173,6 +217,51 @@ def render_report(
         "",
     ]
 
+    intervals = evaluation.get("holdout_intervals") or {}
+    if intervals:
+        lines += [
+            "## Holdout intervals",
+            "",
+            *table(
+                ("model", "AUPRC 95% CI", "AUROC 95% CI", "lift 95% CI"),
+                [
+                    [
+                        name,
+                        f"[{ci['auprc']['lo']:.4f}, {ci['auprc']['hi']:.4f}]",
+                        f"[{ci['auroc']['lo']:.4f}, {ci['auroc']['hi']:.4f}]",
+                        f"[{ci['lift']['lo']:.2f}, {ci['lift']['hi']:.2f}]",
+                    ]
+                    for name, ci in intervals.items()
+                ],
+            ),
+            "",
+            "Percentile intervals over "
+            f"{next(iter(intervals.values()))['auprc']['resamples']:,} resamples of the holdout "
+            "rows, against the point estimates in the table above.",
+            "",
+        ]
+
+    ablation = evaluation.get("block_ablation") or {}
+    if ablation:
+        ordered = sorted(ablation.items(), key=lambda kv: kv[1]["holdout"]["auprc"])
+        lines += [
+            "## Leave one feature block out",
+            "",
+            *table(
+                ("block removed", "columns", "holdout AUPRC", "delta"),
+                [
+                    [
+                        name,
+                        row["dropped"],
+                        f"{row['holdout']['auprc']:.4f}",
+                        f"{row['delta']['holdout_auprc']:+.4f}",
+                    ]
+                    for name, row in ordered
+                ],
+            ),
+            "",
+        ]
+
     if evaluation["sensitivity"]:
         lines += [
             "## Sensitivity",
@@ -202,6 +291,9 @@ def render_report(
             ],
             "",
         ]
+
+    if evaluation.get("event_verification"):
+        lines += _event_section(evaluation["event_verification"])
 
     lines += [
         "## Figures",

@@ -20,7 +20,16 @@ from tfire.features.meteo import (
 )
 from tfire.sources.era5land import Lattice, half_months
 
-_CALM = {"t2m": 283.15, "d2m": 278.15, "sp": 95000.0, "tp": 0.0, "u10": 0.0, "v10": 0.0}
+_CALM = {
+    "t2m": 283.15,
+    "d2m": 278.15,
+    "sp": 95000.0,
+    "tp": 0.0,
+    "u10": 0.0,
+    "v10": 0.0,
+    "swvl1": 0.3,
+    "swvl2": 0.35,
+}
 
 
 def hourly(n_hours: int, start: str = "2003-01-01T00", **fields: object) -> xr.Dataset:

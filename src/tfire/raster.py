@@ -74,9 +74,7 @@ def aligned_window(spec: GridSpec, source: rasterio.DatasetReader) -> tuple[Wind
     return window, factor
 
 
-def write_cell_bands(
-    spec: GridSpec, path: Path, bands: dict[str, npt.NDArray[np.float64]]
-) -> Path:
+def write_cell_bands(spec: GridSpec, path: Path, bands: dict[str, npt.NDArray[np.float64]]) -> Path:
     """Write one flat array per band, in `cell_id` order, onto the grid's own lattice.
 
     The inverse of `read_cell_bands`. Arrays cover the whole grid, not just the active cells,

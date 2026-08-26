@@ -1,0 +1,52 @@
+services:
+  app:
+    build: .
+    image: trentino-fire-risk:latest
+    env_file: [.env]
+    # the defaults are the packaged subset `tfire package-runtime` writes, which is all a
+    # prediction reads. Pointed at the working tree instead, through the variables in
+    # .env.example, the same service also satisfies the admin actions that rebuild the dataset,
+    # retrain, or refetch from Earth Engine.
+    volumes:
+      # writable: on-demand scoring writes risk maps, overlay PNGs and job logs under data/
+      - ${TFIRE_DATA_DIR:-./dist/runtime/data}:/app/data
+      - ${TFIRE_MODELS_DIR:-./dist/runtime/models}:/app/models
+      # the project page serves two evaluation figures out of here, and the retrain action
+      # rewrites them
+      - ${TFIRE_REPORTS_DIR:-./dist/runtime/reports}:/app/reports
+      # a bind mount cannot be conditional: with no Earth Engine credentials to offer, this
+      # mounts an empty directory and the client finds nothing in it
+      - ${TFIRE_EE_DIR:-./docker/empty}:/tmp/.config/earthengine:ro
+    environment:
+      # earthengine-api resolves its credentials through ~, and the container runs under a uid
+      # with no passwd entry: HOME is empty unless spelled out, and the image's own home is
+      # readable only by the account it belongs to
+      HOME: /tmp
+    # bound to the loopback: reaching it from outside goes through the reverse proxy, which is
+    # what terminates TLS and what the rate limit assumes in front of it
+    ports:
+      - "127.0.0.1:${TFIRE_PORT:-8000}:8000"
+    # the mounted data directory is written to, so the container user has to own it. Left to the
+    # image's own uid it would be root-owned inside and unwritable from the host, or the reverse.
+    user: "${TFIRE_UID:-10001}:${TFIRE_GID:-10001}"
+    restart: unless-stopped
+
+  # `docker compose --profile public up` adds the reverse proxy. Without the profile the stack is
+  # the application alone on the loopback, which is what local verification needs.
+  caddy:
+    profiles: ["public"]
+    image: caddy:2-alpine
+    depends_on: [app]
+    env_file: [.env]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    ports:
+      - "80:80"
+      - "443:443"
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:

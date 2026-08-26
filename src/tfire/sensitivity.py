@@ -13,8 +13,8 @@ import pandas as pd
 
 from tfire.config import Config
 from tfire.datasets import assemble
-from tfire.evaluation import scores
-from tfire.features.registry import load_registry
+from tfire.evaluation import bootstrap_scores, scores
+from tfire.features.registry import Registry, load_registry
 from tfire.features.vegetation import extract_vegetation
 from tfire.models.trentino import SPECS, design_matrix, fit_and_predict, training_mask
 from tfire.sampling import build_samples
@@ -105,6 +105,27 @@ def negative_ratio(ratio: int) -> Variant:
     return prepare
 
 
+def matched_negatives(fraction: float) -> Variant:
+    """Pin `fraction` of the negatives to the cells the positives came from."""
+
+    def prepare(config: Config, directory: Path) -> Config:
+        variant = _redirect(
+            config,
+            directory,
+            samples_out="samples.parquet",
+            exclusions_out="exclusions.parquet",
+        )
+        variant = variant.model_copy(
+            update={
+                "sampling": variant.sampling.model_copy(update={"hard_negative_fraction": fraction})
+            }
+        )
+        build_samples(variant)
+        return variant
+
+    return prepare
+
+
 def vegetation_climatology(config: Config, directory: Path) -> Config:
     """Fill a cell-month with no usable observation from its own monthly normal, not with NaN."""
     variant = _redirect(
@@ -156,6 +177,12 @@ VARIANTS: Final[dict[str, VariantSpec]] = {
             "do the cells with no Landsat observation matter enough to fill them?",
             vegetation_climatology,
         ),
+        VariantSpec(
+            "matched_negatives_50",
+            "with half the negatives at cells that have burned, is there anything left to "
+            "separate the classes but the weather?",
+            matched_negatives(0.5),
+        ),
     )
 }
 
@@ -175,6 +202,12 @@ def run_variant(spec: VariantSpec, config: Config, tuning: dict[str, Any]) -> di
 
     pooled = scores(labels[train], fitted.out_of_fold)
     held = scores(labels[~train], fitted.holdout)
+    intervals = bootstrap_scores(
+        labels[~train],
+        fitted.holdout,
+        variant.evaluation.bootstrap_resamples,
+        variant.project.random_seed,
+    )
     logger.info(
         "%-24s | pooled AUPRC %.4f | holdout AUPRC %.4f",
         spec.name,
@@ -188,7 +221,44 @@ def run_variant(spec: VariantSpec, config: Config, tuning: dict[str, Any]) -> di
         "features": len(fitted.columns),
         "pooled_out_of_fold": pooled,
         "holdout": held,
+        "holdout_intervals": intervals,
     }
+
+
+def run_block_ablation(
+    config: Config, tuning: dict[str, Any], baseline: dict[str, Any]
+) -> dict[str, Any]:
+    """Retrain once per feature block with that block's columns dropped."""
+    frame = pd.read_parquet(config.path(config.paths.dataset_out))
+    registry = load_registry()
+    blocks = sorted({spec.category for spec in registry.present(frame)})
+
+    results: dict[str, Any] = {}
+    for block in blocks:
+        kept = [spec for spec in registry.specs if spec.category != block]
+        reduced = Registry(kept, registry.categories)
+        features, labels, years = design_matrix(frame, reduced)
+        train = training_mask(years, config)
+        fitted = fit_and_predict(SPECS["xgboost"], features, labels, years, train, config, tuning)
+        dropped = sum(1 for spec in registry.present(frame) if spec.category == block)
+        held = scores(labels[~train], fitted.holdout)
+        measured: dict[str, Any] = {
+            "dropped": dropped,
+            "features": len(fitted.columns),
+            "pooled_out_of_fold": scores(labels[train], fitted.out_of_fold),
+            "holdout": held,
+        }
+        delta = deltas(baseline, measured)
+        measured["delta"] = delta
+        results[block] = measured
+        logger.info(
+            "%-12s | -%2d column(s) | holdout AUPRC %.4f (%+.4f)",
+            block,
+            dropped,
+            held["auprc"],
+            delta["holdout_auprc"],
+        )
+    return results
 
 
 def deltas(baseline: dict[str, Any], variant: dict[str, Any]) -> dict[str, float]:

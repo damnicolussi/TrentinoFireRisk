@@ -9,9 +9,11 @@ import pytest
 from tfire.config import Config
 from tfire.evaluation import (
     block_index,
+    bootstrap_scores,
     calibration_bins,
     expected_calibration_error,
     precision_at_k,
+    scores,
     spatial_folds,
 )
 from tfire.models.calibration import Calibrator
@@ -109,3 +111,25 @@ def test_isotonic_never_inverts_two_predictions(config: Config) -> None:
     ordered = recalibrated[np.argsort(probabilities, kind="stable")]
     assert np.all(np.diff(ordered) >= 0)
     assert float(recalibrated.mean()) == pytest.approx(float(labels.mean()), abs=0.01)
+
+
+def test_bootstrap_interval_brackets_the_point_estimate() -> None:
+    rng = np.random.default_rng(0)
+    labels = np.repeat([1, 0], [40, 360])
+    probabilities = 1 / (1 + np.exp(-rng.normal(labels * 1.2 - 1.0, 1.0)))
+
+    point = scores(labels, probabilities)
+    interval = bootstrap_scores(labels, probabilities, 200, seed=0)
+
+    for metric in ("auprc", "auroc", "lift"):
+        assert interval[metric]["lo"] < point[metric] < interval[metric]["hi"]
+        assert interval[metric]["resamples"] == 200
+
+
+def test_bootstrap_discards_resamples_with_one_class() -> None:
+    labels = np.array([1] + [0] * 19)
+    probabilities = np.linspace(1.0, 0.0, 20)
+
+    interval = bootstrap_scores(labels, probabilities, 100, seed=0)
+
+    assert 0 < interval["auprc"]["resamples"] < 100

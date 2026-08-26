@@ -53,7 +53,13 @@ HOURLY_FIELDS: Final = (
     "precip_mm",
     "wind_speed",
     "wind_dir",
+    "soil_water_l1",
+    "soil_water_l2",
 )
+
+# volumetric soil water, m3/m3, taken as a daily mean only: it is a slow state variable, and a
+# daily minimum or range of it is noise from the reanalysis rather than a diurnal signal
+SOIL_LAYERS: Final = ("soil_water_l1", "soil_water_l2")
 
 NOON_COLUMNS: Final = ("temp_noon", "rh_noon", "wind_speed_noon", "precip_noon24")
 
@@ -147,6 +153,8 @@ class HourlyFields:
     precip_mm: npt.NDArray[np.float64]
     wind_speed: npt.NDArray[np.float64]
     wind_dir: npt.NDArray[np.float64]
+    soil_water_l1: npt.NDArray[np.float64]
+    soil_water_l2: npt.NDArray[np.float64]
 
     def __post_init__(self) -> None:
         shapes = {name: getattr(self, name).shape for name in HOURLY_FIELDS}
@@ -196,6 +204,9 @@ def aggregate_daily(
         direction_block, peak[:, None, :], axis=1
     ).squeeze(1)
 
+    for layer in SOIL_LAYERS:
+        columns[f"{layer}_mean"] = block(getattr(fields, layer)).mean(axis=1)
+
     columns["temp_noon"] = blocks["temp"][:, NOON_HOUR_LST]
     columns["rh_noon"] = blocks["rh"][:, NOON_HOUR_LST]
     columns["wind_speed_noon"] = speed_block[:, NOON_HOUR_LST]
@@ -222,6 +233,8 @@ def era5_hourly(dataset: xr.Dataset) -> HourlyFields:
         precip_mm=deaccumulate(dataset["tp"].to_numpy() * _M_TO_MM, utc_hour)[usable:],
         wind_speed=speed[usable:],
         wind_dir=direction[usable:],
+        soil_water_l1=dataset["swvl1"].to_numpy()[usable:],
+        soil_water_l2=dataset["swvl2"].to_numpy()[usable:],
     )
 
 
@@ -386,11 +399,15 @@ def build_era5_weights(config: Config, lattice: Lattice) -> pd.DataFrame:
 
 
 def modeling_window(frame: pd.DataFrame, config: Config) -> pd.DataFrame:
-    """Rows inside `date_range`, dropping the spin-up days the table carries ahead of it."""
+    """Rows the checks apply to: the record and its extension, less the spin-up days ahead of it.
+
+    The spin-up is excluded because its lag columns are legitimately incomplete. The extension
+    is not: those days are served, so they are held to the same plausibility bounds.
+    """
     dates = frame["date"]
+    end = config.meteo.extension_end or config.date_range.end
     return frame.loc[
-        (dates >= pd.Timestamp(config.date_range.start))
-        & (dates <= pd.Timestamp(config.date_range.end))
+        (dates >= pd.Timestamp(config.date_range.start)) & (dates <= pd.Timestamp(end))
     ]
 
 

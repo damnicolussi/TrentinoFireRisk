@@ -11,7 +11,7 @@ from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
@@ -37,13 +37,15 @@ SHORT_NAMES: Final[dict[str, str]] = {
     "total_precipitation": "tp",
     "10m_u_component_of_wind": "u10",
     "10m_v_component_of_wind": "v10",
+    "volumetric_soil_water_layer_1": "swvl1",
+    "volumetric_soil_water_layer_2": "swvl2",
 }
 
 RESOLUTION_DEG: Final = 0.1
 
 GEE_COLLECTION: Final = "ECMWF/ERA5_LAND/HOURLY"
 
-# Earth Engine's spelling of the same six fields
+# Earth Engine's spelling of the same fields
 GEE_BANDS: Final[dict[str, str]] = {
     "2m_temperature": "temperature_2m",
     "2m_dewpoint_temperature": "dewpoint_temperature_2m",
@@ -51,6 +53,8 @@ GEE_BANDS: Final[dict[str, str]] = {
     "total_precipitation": "total_precipitation",
     "10m_u_component_of_wind": "u_component_of_wind_10m",
     "10m_v_component_of_wind": "v_component_of_wind_10m",
+    "volumetric_soil_water_layer_1": "volumetric_soil_water_layer_1",
+    "volumetric_soil_water_layer_2": "volumetric_soil_water_layer_2",
 }
 
 # `getDownloadURL` refuses more bands than this, and one window carries hours x variables
@@ -112,10 +116,30 @@ class Lattice:
         return np.tile(self.longitudes, self.n_rows)
 
 
-def fetch_years(config: Config) -> range:
-    """Calendar years to download, including the spin-up years before the modeling window."""
-    start = config.date_range.start.year - config.meteo.spinup_years
-    return range(start, config.date_range.end.year + 1)
+def fetch_end(config: Config) -> date:
+    """Last date the backbone is meant to cover, extension included."""
+    return config.meteo.extension_end or config.date_range.end
+
+
+def fetch_halves(config: Config) -> list[tuple[int, int]]:
+    """Half-years the backbone covers, whole ones only, spin-up included."""
+    first = config.date_range.start.year - config.meteo.spinup_years
+    end = fetch_end(config)
+    return [
+        (year, half)
+        for year in range(first, end.year + 1)
+        for half in HALVES
+        if half_end(year, half) <= end
+    ]
+
+
+def fetch_years(config: Config) -> list[int]:
+    """Calendar years with at least one whole half-year in the record."""
+    return sorted({year for year, _ in fetch_halves(config)})
+
+
+def year_halves(config: Config, year: int) -> list[int]:
+    return [half for cached_year, half in fetch_halves(config) if cached_year == year]
 
 
 def half_months(half: int) -> list[int]:
@@ -123,6 +147,11 @@ def half_months(half: int) -> list[int]:
     if half not in HALVES:
         raise ValueError(f"A year has halves {list(HALVES)}, not {half}")
     return list(range(1, 7) if half == 1 else range(7, 13))
+
+
+def half_end(year: int, half: int) -> date:
+    month = half_months(half)[-1]
+    return date(year, month, monthrange(year, month)[1])
 
 
 def cache_path(config: Config, variable: str, year: int, half: int) -> Path:
@@ -339,21 +368,13 @@ def fetch_era5(config: Config, years: list[int], force: bool = False) -> list[Pa
     if unknown:
         raise ValueError(f"No Earth Engine band known for {unknown}; extend GEE_BANDS")
 
+    wanted = [(year, half) for year, half in fetch_halves(config) if year in set(years)]
     targets = [
         cache_path(config, variable, year, half)
-        for year in years
+        for year, half in wanted
         for variable in config.meteo.variables
-        for half in HALVES
     ]
-    queue = [
-        (year, half)
-        for year in years
-        for half in HALVES
-        if force
-        or not all(
-            cache_path(config, name, year, half).is_file() for name in config.meteo.variables
-        )
-    ]
+    queue = [(year, half) for year, half in wanted if force or not has_half(config, year, half)]
     if not queue:
         logger.info("All %d chunk(s) already cached", len(targets))
         return targets
@@ -393,7 +414,11 @@ def has_half(config: Config, year: int, half: int) -> bool:
 
 def missing_years(config: Config, years: list[int]) -> list[int]:
     """Years with at least one chunk not yet cached."""
-    return [year for year in years if not all(has_half(config, year, half) for half in HALVES)]
+    return [
+        year
+        for year in years
+        if not all(has_half(config, year, half) for half in year_halves(config, year))
+    ]
 
 
 def open_half(config: Config, year: int, half: int) -> xr.Dataset:
@@ -411,7 +436,10 @@ def open_half(config: Config, year: int, half: int) -> xr.Dataset:
 def open_year(config: Config, year: int) -> xr.Dataset:
     import xarray as xr
 
-    return xr.concat([open_half(config, year, half) for half in HALVES], dim="time")
+    halves = year_halves(config, year)
+    if not halves:
+        raise ValueError(f"{year} has no whole half-year inside the record")
+    return xr.concat([open_half(config, year, half) for half in halves], dim="time")
 
 
 def _read_chunk(config: Config, variable: str, year: int, half: int) -> xr.Dataset:
@@ -446,18 +474,18 @@ def _stack_cells(dataset: xr.Dataset) -> xr.Dataset:
 
 
 def read_lattice(config: Config) -> Lattice:
-    """The backbone axes, read from whichever download is already cached."""
+    """The backbone axes, from a cached download if there is one, otherwise from the request box."""
     import xarray as xr
 
-    for year in fetch_years(config):
+    for year, half in fetch_halves(config):
         for variable in config.meteo.variables:
-            for half in HALVES:
-                path = cache_path(config, variable, year, half)
-                if path.is_file():
-                    with xr.open_dataset(path) as dataset:
-                        return lattice_of(_stack_cells(_normalize(dataset)))
+            path = cache_path(config, variable, year, half)
+            if path.is_file():
+                with xr.open_dataset(path) as dataset:
+                    return lattice_of(_stack_cells(_normalize(dataset)))
 
-    raise FileNotFoundError("No ERA5-Land download cached; run `tfire fetch-era5` first")
+    logger.info("No ERA5-Land download cached, taking the lattice from the request box")
+    return bbox_lattice(config)
 
 
 def lattice_of(dataset: xr.Dataset) -> Lattice:

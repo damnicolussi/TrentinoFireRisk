@@ -182,8 +182,7 @@ def _flat_exclusions(
 ) -> npt.NDArray[np.int64]:
     """Excluded cell-days as indices into the flattened `pool x days` space.
 
-    Exclusions outside the pool (inactive or non-burnable cells) or outside the date
-    range have no index and drop out here.
+    Exclusions on inactive cells or outside the date range have no index and drop out here.
     """
     position = np.full(int(pool.max()) + 1, -1, dtype=np.int64)
     position[pool] = np.arange(len(pool))
@@ -203,14 +202,48 @@ def _flat_exclusions(
 def negative_pool(
     grid: pd.DataFrame, exclusions: pd.DataFrame, config: Config
 ) -> tuple[npt.NDArray[Any], pd.DatetimeIndex, npt.NDArray[np.int64]]:
-    """The cell-days a negative can come from: burnable active grid x record, less exclusions.
+    """The cell-days a negative can come from: active grid x record, less exclusions.
 
     Shared with the calibration prior correction, which needs the size of the population the
     negatives were subsampled out of and cannot afford to describe it differently from here.
     """
-    pool = grid.loc[grid["is_trentino"] & ~grid["is_non_burnable"], "cell_id"].to_numpy()
+    pool = grid.loc[grid["is_trentino"], "cell_id"].to_numpy()
     days = pd.date_range(config.date_range.start, config.date_range.end)
     return pool, days, _flat_exclusions(exclusions, pool, days)
+
+
+def matched_negatives(
+    positives: pd.DataFrame,
+    pool: npt.NDArray[Any],
+    days: pd.DatetimeIndex,
+    blocked: npt.NDArray[np.int64],
+    n_matched: int,
+    rng: np.random.Generator,
+) -> npt.NDArray[np.int64]:
+    """Flat indices at cells that burned, on other days of the record.
+
+    A uniform draw over cells x days lets a model separate the classes on where fires ever
+    happen and on the time of year, and never on the weather.
+    """
+    positions = {int(cell): index for index, cell in enumerate(pool)}
+    rows = np.array(
+        [positions[cell] for cell in positives["cell_id"].to_numpy() if int(cell) in positions],
+        dtype=np.int64,
+    )
+    if rows.size == 0:
+        return np.empty(0, dtype=np.int64)
+
+    accepted = np.empty(0, dtype=np.int64)
+    while len(accepted) < n_matched:
+        wanted = n_matched - len(accepted)
+        cells = rng.choice(rows, size=wanted)
+        offsets = rng.integers(0, len(days), size=wanted)
+        batch = cells * len(days) + offsets
+        batch = batch[~np.isin(batch, blocked) & ~np.isin(batch, accepted)]
+        _, first_seen = np.unique(batch, return_index=True)
+        accepted = np.concatenate([accepted, batch[np.sort(first_seen)]])
+
+    return accepted[:n_matched]
 
 
 def sample_negatives(
@@ -219,12 +252,17 @@ def sample_negatives(
     n_negatives: int,
     config: Config,
     rng: np.random.Generator,
+    positives: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Draw cell-days uniformly from the burnable active grid, minus the exclusion set."""
-    if config.sampling.hard_negative_fraction > 0:
-        raise NotImplementedError(
-            "Hard-negative mining draws from high-FWI days, and the FWI series arrives with M5"
-        )
+    """Draw cell-days from the active grid, minus the exclusion set.
+
+    Uniform over the whole pool, except for the `hard_negative_fraction` that is pinned to the
+    cells the positives came from. That fraction is not a uniform sample of the population, so
+    the case-control offset counts only the rest of the draw.
+    """
+    fraction = config.sampling.hard_negative_fraction
+    if fraction > 0 and positives is None:
+        raise ValueError("Matched negatives need the positive rows to draw their cells from")
 
     pool, days, blocked = negative_pool(grid, exclusions, config)
     total = len(pool) * len(days)
@@ -241,10 +279,23 @@ def sample_negatives(
         100 * len(blocked) / total,
     )
 
+    n_matched = int(round(fraction * n_negatives))
+    matched = (
+        matched_negatives(positives, pool, days, blocked, n_matched, rng)
+        if n_matched and positives is not None
+        else np.empty(0, dtype=np.int64)
+    )
+    if n_matched:
+        logger.info(
+            "%d of %d negatives drawn at cells that burned, on other days",
+            len(matched),
+            n_negatives,
+        )
+
     # drawn in order and truncated at the end, never sorted then cut: the flat index is
     # ordered by cell then day, so keeping the smallest would favor the north-west and
     # the 1980s.
-    accepted = np.empty(0, dtype=np.int64)
+    accepted = matched
     while len(accepted) < n_negatives:
         batch = rng.integers(0, total, size=n_negatives - len(accepted))
         batch = batch[~np.isin(batch, blocked) & ~np.isin(batch, accepted)]
@@ -348,7 +399,12 @@ def build_samples(config: Config, force: bool = False) -> pd.DataFrame:
 
     rng = np.random.default_rng(config.project.random_seed)
     negatives = sample_negatives(
-        grid, exclusions, config.sampling.negative_ratio * len(positives), config, rng
+        grid,
+        exclusions,
+        config.sampling.negative_ratio * len(positives),
+        config,
+        rng,
+        positives=positives,
     )
 
     samples = assemble_samples(positives, negatives)
