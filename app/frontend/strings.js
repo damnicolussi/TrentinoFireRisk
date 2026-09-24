@@ -21,7 +21,7 @@ const STRINGS = {
     palette_classes: "Classi assolute",
     palette_rank: "Percentile del giorno",
     layer_fires: "Incendi storici del giorno",
-    basemap_osm: "Mappa",
+    basemap_light: "Mappa",
     basemap_satellite: "Satellite",
     basemap_relief: "Rilievo",
 
@@ -185,7 +185,7 @@ const STRINGS = {
     palette_classes: "Absolute classes",
     palette_rank: "Within-day percentile",
     layer_fires: "Recorded fires of the day",
-    basemap_osm: "Map",
+    basemap_light: "Map",
     basemap_satellite: "Satellite",
     basemap_relief: "Relief",
 

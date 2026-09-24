@@ -277,17 +277,18 @@ def attribution(explained: Attribution, config: Config) -> list[Path]:
 
         frame = explained.per_category.sort_values("mean_abs_shap")
         colors = {"static": SERIES[0], "dynamic": SERIES[1], "unknown": MUTED}
-        temporal = (
-            explained.per_feature.groupby("category")["temporal"].agg(
-                lambda values: values.mode().iat[0]
-            )
-        ).to_dict()
+        temporal = {
+            str(category): str(values.mode().iat[0])
+            for category, values in explained.per_feature.groupby("category")["temporal"]
+        }
 
         figure, axes = plt.subplots(figsize=(5.5, 3.8))
         axes.barh(
             frame["category"],
             frame["share"],
-            color=[colors.get(temporal.get(name, "unknown"), MUTED) for name in frame["category"]],
+            color=[
+                colors.get(temporal.get(str(name), "unknown"), MUTED) for name in frame["category"]
+            ],
             height=0.68,
         )
         for y, (value, count) in enumerate(zip(frame["share"], frame["features"], strict=True)):
