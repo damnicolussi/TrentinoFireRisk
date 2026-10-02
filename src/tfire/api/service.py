@@ -28,6 +28,7 @@ from tfire.inference import (
     cached_span,
     model_fingerprint,
     predict_days,
+    superseded_by_archive,
     table_last_date,
 )
 from tfire.models.danger import DangerClasses, summarize
@@ -192,7 +193,9 @@ def _served_remotely(config: Config, day: date, sidecar: dict[str, Any]) -> bool
         return sidecar.get("sources") != ["cached"]
 
     # past the backbone the map is remote, and the wind correction is part of how it was made
-    return sidecar.get("bias_map") != bias_fingerprint(config)
+    if sidecar.get("bias_map") != bias_fingerprint(config):
+        return True
+    return superseded_by_archive(config, day, list(sidecar.get("sources", [])), date.today())
 
 
 def ensure_day(config: Config, day: date, allow_compute: bool = True) -> dict[str, Path]:

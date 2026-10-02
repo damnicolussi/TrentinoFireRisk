@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, field
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +36,9 @@ class Calibrator:
     log_offset: float
     sampling_rate: float
     counts: dict[str, int]
+    window_offset: float = 0.0
+    reference_years: list[int] | None = None
+    window: dict[str, Any] = field(default_factory=dict)
 
     def to_sample_rate(self, probabilities: npt.NDArray[Any]) -> npt.NDArray[np.float64]:
         """Calibrated against the case-control sample the model was trained on."""
@@ -43,7 +47,11 @@ class Calibrator:
 
     def to_population_rate(self, probabilities: npt.NDArray[Any]) -> npt.NDArray[np.float64]:
         """Calibrated against the real rate of a cell-day burning."""
-        return _inverse_logit(_logit(self.to_sample_rate(probabilities)) + self.log_offset)
+        return _inverse_logit(self.record_logit(probabilities) + self.window_offset)
+
+    def record_logit(self, probabilities: npt.NDArray[Any]) -> npt.NDArray[np.float64]:
+        """Log-odds on the average rate of the years the model was fitted on."""
+        return _logit(self.to_sample_rate(probabilities)) + self.log_offset
 
     def write(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -187,3 +195,219 @@ def report(
         blocks["isotonic"]["brier"],
     )
     return blocks
+
+
+@dataclass(frozen=True)
+class ObservedRate:
+    """Ignitions per population cell-day over a span of years, with its exact 95% interval."""
+
+    years: list[int]
+    ignitions: int
+    cell_days: int
+    rate: float
+    low: float
+    high: float
+
+
+def observed_rate(config: Config, first: int, last: int) -> ObservedRate:
+    """The rate a cell-day burned in `first`-`last`, on the population the negatives came from."""
+    grid = pd.read_parquet(config.path(config.paths.grid_out))
+    exclusions = pd.read_parquet(config.path(config.paths.exclusions_out))
+    samples = pd.read_parquet(config.path(config.paths.samples_out), columns=["date", "is_fire"])
+    pool, days, blocked = negative_pool(grid, exclusions, config)
+    return count_rate(
+        len(pool), days, blocked, samples.loc[samples["is_fire"], "date"], first, last
+    )
+
+
+def count_rate(
+    n_cells: int,
+    days: pd.DatetimeIndex,
+    blocked: npt.NDArray[np.int64],
+    ignitions: pd.Series,
+    first: int,
+    last: int,
+) -> ObservedRate:
+    """Ignitions over the unexcluded cell-days of `first`-`last`."""
+    from scipy.stats import chi2
+
+    inside = (days.year >= first) & (days.year <= last)
+    if not inside.any():
+        raise ValueError(f"{first}-{last} is outside the record {days[0]:%Y}-{days[-1]:%Y}")
+    offsets = np.flatnonzero(inside)
+    day_of = blocked % len(days)
+    excluded = int(((day_of >= offsets[0]) & (day_of <= offsets[-1])).sum())
+    cell_days = n_cells * len(offsets) - excluded
+
+    year = pd.DatetimeIndex(ignitions).year
+    count = int(((year >= first) & (year <= last)).sum())
+    low = chi2.ppf(0.025, 2 * count) / 2 if count else 0.0
+    high = chi2.ppf(0.975, 2 * count + 2) / 2
+    return ObservedRate(
+        years=[first, last],
+        ignitions=count,
+        cell_days=cell_days,
+        rate=count / cell_days,
+        low=float(low) / cell_days,
+        high=float(high) / cell_days,
+    )
+
+
+def sampled_days(first: int, last: int, stride: int) -> list[date]:
+    start, end = date(first, 1, 1), date(last, 12, 31)
+    return [start + timedelta(days=offset) for offset in range(0, (end - start).days + 1, stride)]
+
+
+def mean_rate(logits: npt.NDArray[np.float64], shift: float) -> float:
+    return float(_inverse_logit(logits + shift).mean())
+
+
+def empirical_shift(logits: npt.NDArray[np.float64], target: float) -> float:
+    """The log-odds shift that makes the mean probability over `logits` equal `target`."""
+    from scipy.optimize import brentq
+
+    def gap(shift: float) -> float:
+        return mean_rate(logits, shift) - target
+
+    return float(brentq(gap, -20.0, 20.0, xtol=1e-6))
+
+
+def window_shift(
+    logits: npt.NDArray[np.float64], window: ObservedRate, fitted: ObservedRate
+) -> dict[str, Any]:
+    """Both estimates of the shift to the window's rate, and which one is used."""
+    prior = float(np.log(window.rate / fitted.rate))
+    empirical = empirical_shift(logits, window.rate)
+    prior_mean = mean_rate(logits, prior)
+    inside = window.low <= prior_mean <= window.high
+
+    return {
+        "window": asdict(window),
+        "fitted_on": asdict(fitted),
+        "prior_shift": prior,
+        "empirical_shift": empirical,
+        "unshifted_mean": mean_rate(logits, 0.0),
+        "prior_mean": prior_mean,
+        "chosen": "prior" if inside else "empirical",
+        "shift": prior if inside else empirical,
+        "reason": "the prior shift's mean falls inside the window's 95% interval"
+        if inside
+        else f"the prior shift gives a mean of {prior_mean:.3e}, outside the window's "
+        f"interval {window.low:.3e}-{window.high:.3e}",
+    }
+
+
+def _logits_by_day(
+    config: Config, days: list[date], holdout: bool
+) -> dict[date, npt.NDArray[np.float32]]:
+    """Record-rate log-odds over the whole grid for each day."""
+    from tfire.inference import GridScorer
+
+    scorer = GridScorer(config, days, holdout=holdout)
+    logger.info("Scoring %d whole day(s) for the calibration window", len(days))
+    logits = {}
+    for index, day in enumerate(days):
+        logits[day] = scorer.calibrator.record_logit(scorer.day(day).raw).astype("float32")
+        if index and index % 100 == 0:
+            logger.info("  %d/%d days", index, len(days))
+    return logits
+
+
+def _stack(
+    logits: dict[date, npt.NDArray[np.float32]], first: int, last: int
+) -> npt.NDArray[np.float64]:
+    picked = [values for day, values in logits.items() if first <= day.year <= last]
+    return np.concatenate(picked).astype("float64")
+
+
+def reference_window(config: Config) -> tuple[int, int]:
+    last = config.date_range.end.year
+    return last - config.calibration.window_years + 1, last
+
+
+def apply_window(config: Config) -> Calibrator:
+    """Shift the stored calibrator onto the rate of the reference window, and write it back."""
+    from tfire.inference import model_directory
+
+    path = model_directory(config) / CALIBRATOR_FILENAME
+    stored = Calibrator.read(path)
+
+    first, last = reference_window(config)
+    window = observed_rate(config, first, last)
+    fitted = observed_rate(config, config.date_range.start.year, config.date_range.end.year)
+    days = sampled_days(first, last, config.calibration.empirical_stride_days)
+    logits = _stack(_logits_by_day(config, days, holdout=False), first, last)
+
+    decided = window_shift(logits, window, fitted)
+    decided["days"] = len(days)
+    calibrator = Calibrator(
+        **{
+            **stored.__dict__,
+            "window_offset": decided["shift"],
+            "reference_years": [first, last],
+            "window": decided,
+        }
+    )
+    calibrator.write(path)
+    logger.info(
+        "Calibration window %d-%d: %d ignition(s), rate %.3e | prior shift %.3f, empirical %.3f, "
+        "using the %s one",
+        first,
+        last,
+        window.ignitions,
+        window.rate,
+        decided["prior_shift"],
+        decided["empirical_shift"],
+        decided["chosen"],
+    )
+    return calibrator
+
+
+def validate_window(config: Config) -> list[dict[str, Any]]:
+    """Each validation window's shift, fitted before the holdout years and scored on them."""
+    stride = config.calibration.empirical_stride_days
+    end_fit = config.trentino.test_years_start - 1
+    test_first, test_last = config.trentino.test_years_start, config.date_range.end.year
+    widest = max(config.calibration.validation_windows)
+
+    days = sampled_days(end_fit - widest + 1, test_last, stride)
+    logits = _logits_by_day(config, days, holdout=True)
+
+    fitted = observed_rate(config, config.date_range.start.year, end_fit)
+    after = observed_rate(config, test_first, test_last)
+    target = _stack(logits, test_first, test_last)
+
+    rows = []
+    for length in sorted(config.calibration.validation_windows):
+        window = observed_rate(config, end_fit - length + 1, end_fit)
+        decided = window_shift(_stack(logits, end_fit - length + 1, end_fit), window, fitted)
+        predicted = mean_rate(target, decided["shift"])
+        rows.append(
+            {
+                "window_years": length,
+                "window": window.years,
+                "window_rate": window.rate,
+                "prior_shift": decided["prior_shift"],
+                "empirical_shift": decided["empirical_shift"],
+                "chosen": decided["chosen"],
+                "predicted_after": predicted,
+                "predicted_after_prior": mean_rate(target, decided["prior_shift"]),
+                "predicted_after_empirical": mean_rate(target, decided["empirical_shift"]),
+                "unshifted_after": mean_rate(target, 0.0),
+                "observed_after": asdict(after),
+                "inside_interval": after.low <= predicted <= after.high,
+            }
+        )
+        logger.info(
+            "Window %d-%d: shift %.3f (%s) predicts %.3e on %d-%d, observed %.3e [%.3e, %.3e]",
+            *window.years,
+            decided["shift"],
+            decided["chosen"],
+            predicted,
+            test_first,
+            test_last,
+            after.rate,
+            after.low,
+            after.high,
+        )
+    return rows

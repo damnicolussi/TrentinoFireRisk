@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any
@@ -57,33 +58,50 @@ def _widest(results: dict[str, Any], metric: str) -> float:
 
 
 def _event_rows(verification: dict[str, Any]) -> list[list[Any]]:
+    baseline = verification.get("baseline")
     blocks = [("all", verification["overall"]), *sorted(verification["by_season"].items())]
-    return [
-        [
+    rows = []
+    for name, block in blocks:
+        row = [
             name,
             block["events"],
             f"{block['median_percentile']:.3f}",
             f"{block['share_at_or_above_90']:.1%}",
             f"{block['share_at_or_above_99']:.1%}",
         ]
-        for name, block in blocks
-    ]
+        if baseline:
+            other = baseline["overall"] if name == "all" else baseline["by_season"][name]
+            row += [
+                f"{other['median_percentile']:.3f}",
+                f"{other['share_at_or_above_90']:.1%}",
+                f"{other['share_at_or_above_99']:.1%}",
+            ]
+        rows.append(row)
+    return rows
 
 
 def _event_section(verification: dict[str, Any]) -> list[str]:
     years = verification["years"]
     share = verification["cell_effect_variance_share"]
+    headers = ["events", "n", "median percentile", "at or above 90th", "at or above 99th"]
+    intro = [
+        f"Every cadastre ignition of {years[0]}-{years[1]} against the map its own day was "
+        "scored on, ranked within that day.",
+    ]
+    baseline = verification.get("baseline")
+    if baseline:
+        headers += ["baseline median", "baseline 90th", "baseline 99th"]
+        intro += [
+            f"The map is drawn by the {verification['model']}, so none of these ignitions was "
+            f"seen in fitting. The baseline is the {baseline['name']}, ranked over the same "
+            "grid: what knowing only where fires started before would give.",
+        ]
     return [
         "## Where recorded ignitions landed",
         "",
-        f"Every cadastre ignition of {years[0]}-{years[1]} against the map its own day was "
-        "scored on, ranked within that day. A model that only knew where fires usually are "
-        "would put them near the middle of every day it is shown.",
+        " ".join(intro),
         "",
-        *table(
-            ("events", "n", "median percentile", "at or above 90th", "at or above 99th"),
-            _event_rows(verification),
-        ),
+        *table(headers, _event_rows(verification)),
         "",
         *table(
             ("class", "ignition cells"),
@@ -96,6 +114,63 @@ def _event_section(verification: dict[str, Any]) -> list[str]:
         f"{len(verification['season_window'])} consecutive August days at the end of it. The "
         "second is the number an operator meets: inside one fire season the weather moves "
         "little, so whatever is fixed about a cell is most of what separates two of them.",
+        "",
+    ]
+
+
+def _window_section(window: dict[str, Any] | None) -> list[str]:
+    if not window:
+        return []
+    served = window["served"]
+    first, last = served["window"]["years"]
+    after = window["validation"][0]["observed_after"]
+    observed = after["rate"]
+    rows = [
+        [
+            f"{row['window'][0]}-{row['window'][1]}",
+            f"{row['window_rate']:.2e}",
+            f"{row['prior_shift']:.3f}",
+            f"{row['predicted_after_prior']:.2e} ({row['predicted_after_prior'] / observed:.2f})",
+            f"{row['empirical_shift']:.3f}",
+            f"{row['predicted_after_empirical']:.2e} "
+            f"({row['predicted_after_empirical'] / observed:.2f})",
+            row["chosen"],
+            "yes" if row["inside_interval"] else "no",
+        ]
+        for row in window["validation"]
+    ]
+    return [
+        "### Shift to the current rate",
+        "",
+        f"The offset above lands the probabilities on the average rate of the record, "
+        f"{served['fitted_on']['rate']:.2e} per cell-day. The map serves the rate of "
+        f"{first}-{last} instead, {served['window']['rate']:.2e} ({served['window']['ignitions']} "
+        f"ignitions): a log-odds shift of {served['prior_shift']:.3f} by the prior correction and "
+        f"{served['empirical_shift']:.3f} by matching the whole-grid mean over "
+        f"{served['days']} sampled days. The {served['chosen']} one is used "
+        f"({served['reason']}). Classes and rankings do not move; probabilities and return "
+        f"periods do, by a factor of {math.exp(-served['shift']):.2f}.",
+        "",
+        f"Whether a window predicts the decade after it: the shift fitted on each window before "
+        f"{after['years'][0]} with the model fitted on the training years alone, against the "
+        f"{after['ignitions']} ignitions of {after['years'][0]}-{after['years'][1]} "
+        f"({after['rate']:.2e}, 95% interval {after['low']:.2e}-{after['high']:.2e}). Without "
+        f"any shift that model predicts {window['validation'][0]['unshifted_after']:.2e}. The rule "
+        "picks the empirical shift when the prior one misses the window's own interval.",
+        "",
+        *table(
+            (
+                "window",
+                "window rate",
+                "prior shift",
+                "predicted after (x observed)",
+                "empirical shift",
+                "predicted after (x observed)",
+                "rule picks",
+                "pick inside interval",
+            ),
+            rows,
+        ),
         "",
     ]
 
@@ -215,6 +290,7 @@ def render_report(
         "cell burning on a given day. Mean predicted rate on the holdout after both steps: "
         f"{calibration['population']['mean_predicted']:.2e}.",
         "",
+        *_window_section(evaluation.get("calibration_window")),
     ]
 
     intervals = evaluation.get("holdout_intervals") or {}

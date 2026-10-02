@@ -240,6 +240,27 @@ def test_a_map_written_under_different_conditions_is_recomputed(served: Config) 
     assert service.is_stale(served, DAY)
 
 
+def test_a_recent_map_drawn_on_the_forecast_is_redrawn_once_the_archive_has_the_day(
+    served: Config,
+) -> None:
+    """The warm window's past days would otherwise keep the weather that was only predicted."""
+    from tfire.inference import cached_span
+    from tfire.sources.bias import bias_fingerprint
+
+    requires_built(served, served.paths.grid_out)
+    day = cached_span(served)[1] + timedelta(days=1)
+    if day > date.today() - timedelta(days=served.forecast.archive_latency_days):
+        pytest.skip("the archive does not reach past the cached record yet")
+
+    write_map(served, day, [0, 1, 2], [1e-6, 1e-5, 1e-4])
+    span = f"{day.isoformat()}..{day.isoformat()}"
+    rewrite_sidecar(served, day, bias_map=bias_fingerprint(served), sources=[f"archive:{span}"])
+    assert not service.is_stale(served, day)
+
+    rewrite_sidecar(served, day, sources=[f"forecast:{span}"])
+    assert service.is_stale(served, day)
+
+
 def test_repainting_the_map_moves_the_overlay_address_and_its_token(served: Config) -> None:
     """The PNGs are served immutable, so anything that changes a pixel has to change the URL."""
     requires_built(served, served.paths.grid_out)
@@ -400,7 +421,9 @@ def test_the_runtime_manifest_covers_every_input_the_service_opens(
         app_state_out=Path("app_state.json"),
     )
 
-    field_of = {Path(value): name for name, value in served.paths.model_dump().items()}
+    field_of = {
+        Path(value): name for name, value in served.paths.model_dump().items() if value is not None
+    }
     touched: set[str] = set()
     original = Config.path
 

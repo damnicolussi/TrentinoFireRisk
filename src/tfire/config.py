@@ -99,6 +99,7 @@ class PathsConfig(BaseModel):
     app_state_out: Path
     frontend_dir: Path
     runtime_manifest_out: Path
+    pat_municipalities: Path | None = None
 
 
 class CorineConfig(BaseModel):
@@ -384,6 +385,14 @@ class TrentinoConfig(BaseModel):
         return len(self.danger_percentiles) + 1
 
 
+class CalibrationConfig(BaseModel):
+    model_config = _STRICT
+
+    window_years: int = Field(gt=0)
+    empirical_stride_days: int = Field(gt=0)
+    validation_windows: list[int] = Field(min_length=1)
+
+
 class EvaluationConfig(BaseModel):
     model_config = _STRICT
 
@@ -511,6 +520,7 @@ class Config(BaseModel):
     sampling: SamplingConfig
     mesogeos: MesogeosConfig
     trentino: TrentinoConfig
+    calibration: CalibrationConfig
     evaluation: EvaluationConfig
     dataset: DatasetConfig
     forecast: ForecastConfig

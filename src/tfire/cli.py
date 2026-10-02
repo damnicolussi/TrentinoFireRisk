@@ -21,7 +21,7 @@ from tfire.models.danger import build_danger_classes
 from tfire.models.evaluate import evaluate_trentino
 from tfire.models.events import EVENTS_FILENAME, verify_events
 from tfire.models.mesogeos import train_mesogeos
-from tfire.models.trentino import SPECS, train_trentino
+from tfire.models.trentino import SPECS, save_holdout_model, train_trentino
 from tfire.packaging import package_runtime
 from tfire.preflight import CHECKS, check_access
 from tfire.sampling import build_samples
@@ -154,9 +154,22 @@ def train_mesogeos_command(config: ConfigOption = None, force: ForceOption = Fal
 
 @app.command("train")
 def train_command(
-    config: ConfigOption = None, model: ModelOption = None, force: ForceOption = False
+    config: ConfigOption = None,
+    model: ModelOption = None,
+    force: ForceOption = False,
+    holdout_only: Annotated[
+        bool,
+        typer.Option(
+            "--holdout-only",
+            help="Only refit the stored settings on the training years and save that fit.",
+        ),
+    ] = False,
 ) -> None:
     """Train the Trentino model and its baselines on the assembled table."""
+    if holdout_only:
+        save_holdout_model(_start(config))
+        return
+
     names = None if not model else [name.lower() for name in model]
     if names:
         unknown = sorted(set(names) - set(SPECS))
@@ -256,6 +269,26 @@ def danger_classes_command(config: ConfigOption = None, force: ForceOption = Fal
     build_danger_classes(_start(config), force=force)
 
 
+@app.command("calibrate-window")
+def calibrate_window_command(config: ConfigOption = None) -> None:
+    """Shift the stored calibrator onto the rate of the reference window, and validate the shift."""
+    from tfire.models.calibration import apply_window, validate_window
+    from tfire.models.evaluate import EVALUATION_FILENAME
+
+    cfg = _start(config)
+    calibrator = apply_window(cfg)
+    validation = validate_window(cfg)
+
+    path = model_directory(cfg) / EVALUATION_FILENAME
+    if path.is_file():
+        evaluation = json.loads(path.read_text(encoding="utf-8"))
+        evaluation["calibration_window"] = {"served": calibrator.window, "validation": validation}
+        evaluation["sampling_correction"]["window_offset"] = calibrator.window_offset
+        path.write_text(json.dumps(evaluation, indent=2), encoding="utf-8")
+        logger.info("Updated %s", path)
+    logger.info("Run `tfire danger-classes --force` so the breaks follow the shift")
+
+
 @app.command("fit-bias-map")
 def fit_bias_map_command(config: ConfigOption = None, force: ForceOption = False) -> None:
     """Fit the quantile map that puts remotely served fields back on the backbone."""
@@ -283,6 +316,57 @@ def verify_events_command(config: ConfigOption = None) -> None:
         100 * float(report["cell_effect_variance_share"]),
     )
     logger.info("Wrote %s", path)
+
+
+@app.command("verify-cases")
+def verify_cases_command(
+    cases: Annotated[
+        Path | None,
+        typer.Argument(
+            help="CSV of fires to verify; the cadastre's post-record fires always join."
+        ),
+    ] = None,
+    config: ConfigOption = None,
+) -> None:
+    """Score single fires after the record against their own day's map and the days around it."""
+    from tfire.models.cases import verify_cases
+
+    try:
+        verify_cases(_start(config), cases)
+    except FeatureUnavailableError as error:
+        logger.error("%s", error)
+        raise typer.Exit(code=1) from error
+
+
+@app.command("episodes")
+def episodes_command(
+    config: ConfigOption = None,
+    start: Annotated[
+        datetime, typer.Option("--start", formats=["%Y-%m-%d"], help="First day to scan.")
+    ] = datetime(2025, 1, 1),
+    end: Annotated[
+        datetime | None,
+        typer.Option("--end", formats=["%Y-%m-%d"], help="Last day to scan. Defaults to today."),
+    ] = None,
+    cases: Annotated[
+        Path | None,
+        typer.Option(
+            "--cases", help="CSV of fires after the cadastre, in the verify-cases format."
+        ),
+    ] = None,
+    base_url: Annotated[
+        str, typer.Option("--base-url", help="Where the map links in the report point.")
+    ] = "https://tfire.nicolussi.dev",
+) -> None:
+    """Group extreme-risk cell-days after the record into episodes and check them against fires."""
+    from tfire.models.episodes import build_episodes
+
+    last = end.date() if end else date.today()
+    try:
+        build_episodes(_start(config), start.date(), last, cases, base_url)
+    except FeatureUnavailableError as error:
+        logger.error("%s", error)
+        raise typer.Exit(code=1) from error
 
 
 @app.command("serve")

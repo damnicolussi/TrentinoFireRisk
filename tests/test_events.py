@@ -38,16 +38,25 @@ def classes() -> DangerClasses:
 
 
 class FakeScorer:
-    """`GridScorer.day` over the fixture, same three-tuple and the same pandas ranking."""
+    """`GridScorer.day` over the fixture, same four fields and the same pandas ranking."""
 
-    def __init__(self, config: Config, days: list[date], today: date | None = None) -> None:
+    built_with_holdout: list[bool] = []
+
+    def __init__(
+        self,
+        config: Config,
+        days: list[date],
+        today: date | None = None,
+        holdout: bool = False,
+    ) -> None:
         self.days = days
+        FakeScorer.built_with_holdout.append(holdout)
 
-    def day(self, day: date) -> tuple[pd.DataFrame, Any, Any]:
+    def day(self, day: date) -> tuple[pd.DataFrame, Any, Any, Any]:
         probability = np.asarray(_SCORES[day], dtype="float64")
         frame = pd.DataFrame({"cell_id": np.arange(len(probability), dtype="int32")})
         rank = pd.Series(probability).rank(pct=True).to_numpy()
-        return frame, probability, rank
+        return frame, probability, probability, rank
 
 
 @pytest.fixture
@@ -70,6 +79,14 @@ def wired(monkeypatch: pytest.MonkeyPatch, config: Config) -> Config:
             }
         ),
     )
+    monkeypatch.setattr(
+        events,
+        "history_baseline",
+        lambda _config, _year: pd.Series(
+            np.linspace(0.2, 1.0, 5), index=pd.Index(np.arange(5), name="cell_id")
+        ),
+    )
+    monkeypatch.setattr(FakeScorer, "built_with_holdout", [])
     monkeypatch.setattr(events, "reference_days", lambda _config: sorted(_SCORES))
     monkeypatch.setattr(events, "_season_window", lambda _config: sorted(_SCORES))
     return config
@@ -97,6 +114,15 @@ def test_an_ignition_is_scored_at_its_own_cells_rank_within_its_own_day(
     }
     assert set(report["by_season"]) == {"spring", "summer"}
     assert report["days_scored"] == 2
+
+
+def test_ignitions_are_scored_by_the_fit_that_never_saw_them(wired: Config) -> None:
+    """The shipped estimator has every holdout ignition among its positives."""
+    report = events.verify_events(wired)
+
+    assert FakeScorer.built_with_holdout == [True]
+    # cell 4 on the quiet day, cell 0 on the loud one
+    assert report["baseline"]["overall"]["median_percentile"] == pytest.approx(0.6)
 
 
 def test_a_ranking_that_is_the_same_picture_every_day_reads_as_a_cell_effect() -> None:

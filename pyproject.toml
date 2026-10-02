@@ -125,6 +125,7 @@ module = [
     "xgboost.*",
     "sklearn.*",
     "shap.*",
+    "scipy.*",
 ]
 ignore_missing_imports = true
 

@@ -18,6 +18,7 @@ paths:
   fire_polygons_out: "data/interim/fire_polygons.parquet"
   pat_boundary: "data/raw/pat_boundary/ammprv_v.shp"
   pat_waterbodies: "data/raw/pat_hydro/idrspacq.shp"
+  pat_municipalities: "data/raw/pat_municipalities/ammcom_v.shp"
   corine_raw: "data/raw/corine"
   corine_out: "data/interim/corine"
   dem_raster: "data/raw/dem/glo30_terrain_500m.tif"
@@ -320,7 +321,7 @@ mesogeos:
 
 trentino:
   # artifacts land in models/trentino/<version>/.
-  version: "v2"
+  version: "v2.1"
 
   test_years_start: 2015
 
@@ -343,6 +344,11 @@ trentino:
   logistic:
     max_iter: 2000
     c: 1.0
+
+calibration:
+  window_years: 10
+  empirical_stride_days: 7
+  validation_windows: [5, 10, 15]
 
 evaluation:
   # share of the scored rows a responder could act on, for precision/recall at the top of the

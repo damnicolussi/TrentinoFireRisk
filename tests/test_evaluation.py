@@ -16,7 +16,9 @@ from tfire.evaluation import (
     scores,
     spatial_folds,
 )
-from tfire.models.calibration import Calibrator
+from tfire.models.calibration import Calibrator, count_rate
+
+from .conftest import requires_model
 
 
 def test_precision_at_k_counts_the_top_of_the_ranking() -> None:
@@ -133,3 +135,37 @@ def test_bootstrap_discards_resamples_with_one_class() -> None:
     interval = bootstrap_scores(labels, probabilities, 100, seed=0)
 
     assert 0 < interval["auprc"]["resamples"] < 100
+
+
+def test_a_window_rate_counts_only_its_own_years_and_drops_their_exclusions() -> None:
+    """An off-by-one on the window moves the rate every served probability is shifted to."""
+    days = pd.date_range("2013-01-01", "2016-12-31")
+    n_cells = 3
+    first_2015 = int(np.flatnonzero(days.year == 2015)[0])
+    # cell 1 blocked on 1 Jan 2015 and on 31 Dec 2014, cell 2 on 1 Jan 2016
+    blocked = np.array(
+        [
+            1 * len(days) + first_2015,
+            1 * len(days) + first_2015 - 1,
+            2 * len(days) + first_2015 + 365,
+        ]
+    )
+    ignitions = pd.Series(pd.to_datetime(["2014-12-31", "2015-01-01", "2016-06-01", "2016-12-31"]))
+
+    rate = count_rate(n_cells, days, blocked, ignitions, 2015, 2016)
+
+    assert rate.ignitions == 3
+    assert rate.cell_days == n_cells * (365 + 366) - 2
+    assert rate.low < rate.rate < rate.high
+
+
+def test_the_served_shift_puts_the_grid_mean_inside_the_windows_interval(config: Config) -> None:
+    """The window correction is only right if the map it serves averages the window's rate."""
+    requires_model(config)
+    directory = config.path(config.paths.trentino_model_dir) / config.trentino.version
+    window = Calibrator.read(directory / "calibrator.json").window
+    if not window:
+        pytest.skip("the active calibrator carries no window shift")
+
+    mean = window["prior_mean"] if window["chosen"] == "prior" else window["window"]["rate"]
+    assert window["window"]["low"] <= mean <= window["window"]["high"]

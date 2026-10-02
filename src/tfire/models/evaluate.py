@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -20,8 +20,10 @@ from tfire.models.danger import build_danger_classes
 from tfire.models.events import verify_events
 from tfire.models.explain import attribute
 from tfire.models.trentino import (
+    HOLDOUT_MODEL_FILENAME,
     METRICS_FILENAME,
     SPECS,
+    BoostedEstimator,
     ModelSpec,
     design_matrix,
     final_params,
@@ -166,6 +168,7 @@ def evaluate_trentino(
         metrics["models"][PRIMARY]["holdout"], scores(labels[~train], fitted.holdout)
     )
     pooled = scores(labels[train], fitted.out_of_fold)
+    cast("BoostedEstimator", fitted.estimator).save_model(directory / HOLDOUT_MODEL_FILENAME)
 
     probabilities = baseline_probabilities(features, labels, train, config, tuning, fitted.holdout)
     intervals = {
@@ -195,7 +198,7 @@ def evaluate_trentino(
         )
         ablation = sensitivity.run_block_ablation(config, tuning, metrics["models"][PRIMARY])
 
-    evaluation = {
+    evaluation: dict[str, Any] = {
         "version": config.trentino.version,
         "rows": {"train": int(train.sum()), "holdout": int((~train).sum())},
         "pooled_out_of_fold": pooled,
@@ -241,8 +244,14 @@ def evaluate_trentino(
         written.append(sensitivity_figure)
 
     calibrator.write(directory / calibration.CALIBRATOR_FILENAME)
-    classes = build_danger_classes(config, force=True)
-    evaluation["event_verification"] = verify_events(config, classes)
+    calibrator = calibration.apply_window(config)
+    evaluation["sampling_correction"]["window_offset"] = calibrator.window_offset
+    evaluation["calibration_window"] = {
+        "served": calibrator.window,
+        "validation": calibration.validate_window(config),
+    }
+    build_danger_classes(config, force=True)
+    evaluation["event_verification"] = verify_events(config)
 
     out.write_text(json.dumps(evaluation, indent=2), encoding="utf-8")
     report = render_report(evaluation, metrics, written, config)

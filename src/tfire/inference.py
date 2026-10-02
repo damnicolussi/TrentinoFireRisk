@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, NamedTuple
 
 import numpy as np
 import numpy.typing as npt
@@ -28,6 +28,7 @@ from tfire.models.calibration import CALIBRATOR_FILENAME, Calibrator
 from tfire.models.mesogeos import MODEL_FILENAME as MESOGEOS_MODEL
 from tfire.models.mesogeos import PROB_COLUMN, predict_prob
 from tfire.models.trentino import (
+    HOLDOUT_MODEL_FILENAME,
     METRICS_FILENAME,
     Estimator,
     align_columns,
@@ -48,6 +49,9 @@ MODEL_FILENAME: Final = "model.json"
 
 PROBABILITY_BAND: Final = "probability"
 RANK_BAND: Final = "rank"
+SCORE_COLUMN: Final = "score"
+
+RANK_RULE: Final = "raw-score"
 
 DRIVER_COLUMNS: Final = (
     "fwi",
@@ -96,18 +100,21 @@ def model_fingerprint(config: Config) -> str:
     for name in (MODEL_FILENAME, CALIBRATOR_FILENAME):
         path = directory / name
         digest.update(path.read_bytes() if path.is_file() else b"")
+    digest.update(RANK_RULE.encode("utf-8"))
     return digest.hexdigest()[:16]
 
 
-def load_model(config: Config) -> tuple[Estimator, list[str], Calibrator]:
+def load_model(config: Config, holdout: bool = False) -> tuple[Estimator, list[str], Calibrator]:
     """The shipped estimator, the columns it was fitted on, and its calibrator."""
     from xgboost import XGBClassifier
 
     directory = model_directory(config)
-    for name in (MODEL_FILENAME, METRICS_FILENAME, CALIBRATOR_FILENAME):
+    weights = HOLDOUT_MODEL_FILENAME if holdout else MODEL_FILENAME
+    for name in (weights, METRICS_FILENAME, CALIBRATOR_FILENAME):
         if not (directory / name).is_file():
+            hint = "train --holdout-only" if name == HOLDOUT_MODEL_FILENAME else "train"
             raise FileNotFoundError(
-                f"{directory / name} is missing. Run `tfire train` and `tfire evaluate` first."
+                f"{directory / name} is missing. Run `tfire {hint}` and `tfire evaluate` first."
             )
 
     metrics = json.loads((directory / METRICS_FILENAME).read_text(encoding="utf-8"))
@@ -117,7 +124,7 @@ def load_model(config: Config) -> tuple[Estimator, list[str], Calibrator]:
         logger.info("Config has changed since training: %s -> %s", stamp[:12], config.digest()[:12])
 
     estimator = XGBClassifier()
-    estimator.load_model(directory / MODEL_FILENAME)
+    estimator.load_model(directory / weights)
     calibrator = Calibrator.read(directory / CALIBRATOR_FILENAME)
     return estimator, list(metrics["columns"]), calibrator
 
@@ -229,6 +236,24 @@ def _backbone_daily(config: Config, plan: Plan, lattice: Lattice) -> pd.DataFram
     return merged[merged["date"].isin(wanted)]
 
 
+def superseded_by_archive(config: Config, day: date, sources: list[str], today: date) -> bool:
+    """Whether a map drew `day` from the forecast and the archive now reaches that day.
+
+    The forecast stands in for days the archive has not caught up with yet; once it has, the
+    map is a guess where a reanalysis is available.
+    """
+    if day > forecast.window(config, "archive", today)[1]:
+        return False
+    for source in sources:
+        provider, _, span = source.partition(":")
+        if provider != "forecast":
+            continue
+        start, _, end = span.partition("..")
+        if date.fromisoformat(start) <= day <= date.fromisoformat(end):
+            return True
+    return False
+
+
 def active_cells(config: Config) -> npt.NDArray[np.int64]:
     """The cells a prediction covers: the same population the negatives are drawn from."""
     _, grid = load_grid(config)
@@ -322,21 +347,36 @@ def check_contract(frame: pd.DataFrame, registry: Registry, day: date) -> None:
         )
 
 
+class Scores(NamedTuple):
+    raw: npt.NDArray[np.float64]
+    probability: npt.NDArray[np.float64]
+    rank: npt.NDArray[np.float64]
+
+
+class DayScores(NamedTuple):
+    frame: pd.DataFrame
+    raw: npt.NDArray[np.float64]
+    probability: npt.NDArray[np.float64]
+    rank: npt.NDArray[np.float64]
+
+
+def within_day_rank(raw: npt.NDArray[Any]) -> npt.NDArray[np.float64]:
+    return np.asarray(pd.Series(raw).rank(pct=True), dtype="float64")
+
+
 def score(
     frame: pd.DataFrame,
     registry: Registry,
     estimator: Estimator,
     columns: list[str],
     calibrator: Calibrator,
-) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
-    """Population-rate probability per row, and its rank within the day."""
+) -> Scores:
+    """Estimator score, population-rate probability, and rank within the day, per row."""
     features, _, _ = design_matrix(frame.assign(is_fire=False), registry)
     aligned = align_columns(features, columns)
 
-    raw = estimator.predict_proba(aligned)[:, 1]
-    probability = calibrator.to_population_rate(raw)
-    rank = np.asarray(pd.Series(probability).rank(pct=True), dtype="float64")
-    return probability, rank
+    raw = np.asarray(estimator.predict_proba(aligned)[:, 1], dtype="float64")
+    return Scores(raw, calibrator.to_population_rate(raw), within_day_rank(raw))
 
 
 def _outputs(config: Config, day: date) -> dict[str, Path]:
@@ -353,17 +393,18 @@ def write_day(
     day: date,
     spec: GridSpec,
     frame: pd.DataFrame,
-    probability: npt.NDArray[np.float64],
-    rank: npt.NDArray[np.float64],
+    scored: Scores,
     provenance: dict[str, Any],
 ) -> dict[str, Path]:
     paths = _outputs(config, day)
+    probability, rank = scored.probability, scored.rank
 
     table = pd.DataFrame(
         {
             "cell_id": frame["cell_id"].to_numpy("int32"),
             PROBABILITY_BAND: probability.astype("float32"),
             RANK_BAND: rank.astype("float32"),
+            SCORE_COLUMN: scored.raw.astype("float32"),
             **{name: frame[name].to_numpy("float32") for name in DRIVER_COLUMNS},
         }
     )
@@ -416,11 +457,17 @@ def _provenance(
 class GridScorer:
     """Scores whole days on the active grid, reusing the blocks that do not move between them."""
 
-    def __init__(self, config: Config, days: list[date], today: date | None = None) -> None:
+    def __init__(
+        self,
+        config: Config,
+        days: list[date],
+        today: date | None = None,
+        holdout: bool = False,
+    ) -> None:
         self.config = config
         self.plan = plan_days(config, days, today)
         self.registry = load_registry()
-        self.estimator, self.columns, self.calibrator = load_model(config)
+        self.estimator, self.columns, self.calibrator = load_model(config, holdout)
         self.spec, _ = load_grid(config)
 
         lattice = read_lattice(config)
@@ -431,9 +478,7 @@ class GridScorer:
         self._statics: dict[tuple[int, int], pd.DataFrame] = {}
         self._vegetation: dict[date, pd.DataFrame] = {}
 
-    def day(
-        self, day: date
-    ) -> tuple[pd.DataFrame, npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+    def day(self, day: date) -> DayScores:
         stamp = pd.Series([pd.Timestamp(day)])
         key = (
             int(nearest_edition(stamp, self.config.corine.editions).iloc[0]),
@@ -455,10 +500,8 @@ class GridScorer:
             self._vegetation[composite],
         )
         check_contract(frame, self.registry, day)
-        probability, rank = score(
-            frame, self.registry, self.estimator, self.columns, self.calibrator
-        )
-        return frame, probability, rank
+        scored = score(frame, self.registry, self.estimator, self.columns, self.calibrator)
+        return DayScores(frame, *scored)
 
 
 def predict_days(
@@ -486,14 +529,13 @@ def predict_days(
 
     written = []
     for day in pending:
-        frame, probability, rank = scorer.day(day)
+        frame, raw, probability, rank = scorer.day(day)
         paths = write_day(
             config,
             day,
             scorer.spec,
             frame,
-            probability,
-            rank,
+            Scores(raw, probability, rank),
             _provenance(config, day, scorer.plan, frame, probability),
         )
         logger.info(

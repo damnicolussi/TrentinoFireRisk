@@ -39,6 +39,7 @@ class DangerClasses:
     config_sha256: str
     quantiles: list[float] | None = None
     mean_probability: float | None = None
+    raw_quantiles: list[float] | None = None
 
     def classify(self, probability: npt.ArrayLike) -> npt.NDArray[np.int8]:
         """Class index per value, `-1` where the probability is missing."""
@@ -48,11 +49,11 @@ class DangerClasses:
 
     def record_percentile(self, probability: float) -> float | None:
         """Share of the reference record this probability sits at or above, in percent."""
-        if self.quantiles is None:
-            return None
-        rung = int(np.searchsorted(np.asarray(self.quantiles), probability, side="right")) - 1
-        steps = len(self.quantiles) - 1
-        return round(100.0 * min(max(rung, 0), steps) / steps, 1)
+        return _rung(self.quantiles, probability)
+
+    def raw_record_percentile(self, score: float) -> float | None:
+        """The same on the estimator's score, before calibration."""
+        return _rung(self.raw_quantiles, score)
 
     def write(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -63,8 +64,16 @@ class DangerClasses:
         return cls(**json.loads(path.read_text(encoding="utf-8")))
 
 
+def _rung(ladder: list[float] | None, value: float) -> float | None:
+    if ladder is None:
+        return None
+    rung = int(np.searchsorted(np.asarray(ladder), value, side="right")) - 1
+    steps = len(ladder) - 1
+    return round(100.0 * min(max(rung, 0), steps) / steps, 1)
+
+
 def reference_days(config: Config) -> list[date]:
-    """Every `danger_reference_stride`-th day of the years the shipped estimator never saw."""
+    """Every `danger_reference_stride`-th day of the holdout years."""
     first = date(config.trentino.test_years_start, 1, 1)
     last = config.date_range.end
     if first >= last:
@@ -75,21 +84,27 @@ def reference_days(config: Config) -> list[date]:
     return [first + timedelta(days=offset) for offset in range(0, span, stride)]
 
 
-def _reference_scores(config: Config) -> npt.NDArray[np.float64]:
-    """Calibrated probabilities over the whole grid, on a sample of holdout days."""
+def _reference_scores(
+    config: Config,
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+    """Estimator scores and calibrated probabilities over the whole grid, on the holdout days."""
     from tfire.inference import GridScorer
 
     days = reference_days(config)
     scorer = GridScorer(config, days)
     logger.info("Scoring %d whole day(s) for the danger-class reference", len(days))
 
-    blocks = []
+    raws, probabilities = [], []
     for index, day in enumerate(days):
-        _, probability, _ = scorer.day(day)
-        blocks.append(probability.astype("float32"))
+        scored = scorer.day(day)
+        raws.append(scored.raw.astype("float32"))
+        probabilities.append(scored.probability.astype("float32"))
         if index and index % 50 == 0:
             logger.info("  %d/%d days", index, len(days))
-    return np.concatenate(blocks).astype("float64")
+    return (
+        np.concatenate(raws).astype("float64"),
+        np.concatenate(probabilities).astype("float64"),
+    )
 
 
 def build_danger_classes(config: Config, force: bool = False) -> DangerClasses:
@@ -100,7 +115,8 @@ def build_danger_classes(config: Config, force: bool = False) -> DangerClasses:
         logger.info("%s already exists, use --force to rebuild", path)
         return DangerClasses.read(path)
 
-    scores = _reference_scores(config)
+    raw, scores = _reference_scores(config)
+    rungs = np.linspace(0, 100, QUANTILE_RUNGS)
 
     percentiles = list(config.trentino.danger_percentiles)
     breaks = [float(value) for value in np.percentile(scores, percentiles)]
@@ -120,10 +136,9 @@ def build_danger_classes(config: Config, force: bool = False) -> DangerClasses:
         rows=int(scores.size),
         model_version=config.trentino.version,
         config_sha256=config.digest(),
-        quantiles=[
-            float(value) for value in np.percentile(scores, np.linspace(0, 100, QUANTILE_RUNGS))
-        ],
+        quantiles=[float(value) for value in np.percentile(scores, rungs)],
         mean_probability=float(scores.mean()),
+        raw_quantiles=[float(value) for value in np.percentile(raw, rungs)],
     )
     classes.write(path)
 

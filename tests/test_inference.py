@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import pandas as pd
@@ -231,3 +232,60 @@ def test_the_cached_span_follows_the_tables_rather_than_the_modeling_window(
 
     # and a table that does not reach the modeling window never shortens it
     assert cached_span(config)[1] >= config.date_range.end
+
+
+def test_the_day_rank_breaks_the_calibrators_ties_without_reordering_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rank on the stepped calibrated value still looks like a percentile, just a coarse one."""
+    import tfire.inference
+    from tfire.features.registry import Registry
+    from tfire.models.calibration import Calibrator
+    from tfire.models.trentino import Estimator
+
+    raw = np.random.default_rng(0).uniform(0.0, 1.0, 500)
+
+    class Stub:
+        def predict_proba(self, features: pd.DataFrame) -> np.ndarray:
+            return np.column_stack([1 - raw, raw])
+
+    monkeypatch.setattr(tfire.inference, "design_matrix", lambda frame, _r: (frame, None, None))
+    monkeypatch.setattr(tfire.inference, "align_columns", lambda features, _c: features)
+
+    # flat below 0.3 and above 0.6: two plateaus that swallow most of the cells
+    stepped = Calibrator(
+        thresholds=[0.0, 0.3, 0.6, 1.0],
+        values=[0.01, 0.01, 0.2, 0.2],
+        log_offset=-9.0,
+        sampling_rate=1e-4,
+        counts={},
+    )
+    scored = tfire.inference.score(
+        pd.DataFrame(index=range(raw.size)),
+        cast("Registry", None),
+        cast("Estimator", Stub()),
+        [],
+        stepped,
+    )
+
+    assert len(np.unique(scored.probability)) < raw.size / 2
+    assert len(np.unique(scored.rank)) == raw.size
+
+    higher = scored.probability[:, None] > scored.probability[None, :]
+    assert not (higher & (scored.rank[:, None] <= scored.rank[None, :])).any()
+
+
+def test_a_day_drawn_on_the_forecast_is_redrawn_once_the_archive_reaches_it(
+    config: Config,
+) -> None:
+    """Otherwise a week of forecast weather stays in the record as if it had happened."""
+    from tfire.inference import superseded_by_archive
+
+    today = date(2026, 10, 2)
+    sources = ["archive:2026-06-01..2026-09-23", "forecast:2026-09-24..2026-09-30"]
+    archive_end = today - timedelta(days=config.forecast.archive_latency_days)
+
+    assert superseded_by_archive(config, date(2026, 9, 24), sources, today)
+    assert not superseded_by_archive(config, archive_end + timedelta(days=1), sources, today)
+    assert not superseded_by_archive(config, date(2026, 9, 20), sources, today)
+    assert not superseded_by_archive(config, date(2026, 9, 24), ["cached"], today)

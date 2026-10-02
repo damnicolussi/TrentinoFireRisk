@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 MODEL_FILENAME: Final = "model.json"
+HOLDOUT_MODEL_FILENAME: Final = "model_holdout.json"
 METRICS_FILENAME: Final = "metrics.json"
 
 FWI_COLUMN: Final = "fwi"
@@ -355,8 +356,8 @@ def evaluate_spec(
     train: npt.NDArray[np.bool_],
     config: Config,
     tuning: dict[str, Any],
-) -> dict[str, Any]:
-    """One model's fold scores, pooled out-of-fold scores and holdout scores."""
+) -> tuple[dict[str, Any], Estimator]:
+    """One model's fold, pooled out-of-fold and holdout scores, and its holdout fit."""
     fitted = fit_and_predict(spec, features, labels, years, train, config, tuning)
     pooled = scores(labels[train], fitted.out_of_fold)
     held = scores(labels[~train], fitted.holdout)
@@ -376,7 +377,7 @@ def evaluate_spec(
         "pooled_out_of_fold": pooled,
         "holdout": held,
         "hyperparameters": final_params(tuning) if spec.tuned else "fixed, see config",
-    }
+    }, fitted.estimator
 
 
 def _ship(
@@ -434,8 +435,13 @@ def train_trentino(
             raise ValueError("No stored tuning to reuse: run with the xgboost model selected")
 
     models = dict(stored.get("models", {}))
+    holdout_fit: Estimator | None = None
     for spec in specs:
-        models[spec.name] = evaluate_spec(spec, features, labels, years, train, config, tuning)
+        models[spec.name], estimator = evaluate_spec(
+            spec, features, labels, years, train, config, tuning
+        )
+        if spec.name == "xgboost":
+            holdout_fit = estimator
 
     metrics = {
         "version": config.trentino.version,
@@ -453,8 +459,36 @@ def train_trentino(
     }
 
     directory.mkdir(parents=True, exist_ok=True)
-    if "xgboost" in names:
+    if holdout_fit is not None:
         _ship(features, labels, config, tuning, directory / MODEL_FILENAME)
+        cast("BoostedEstimator", holdout_fit).save_model(directory / HOLDOUT_MODEL_FILENAME)
     metrics_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
     logger.info("Wrote %d model(s) and their metrics to %s", len(specs), directory)
     return metrics
+
+
+def save_holdout_model(config: Config) -> Path:
+    """Refit the stored xgboost settings on the training years alone and save that fit."""
+    from tfire.models.evaluate import check_reproducible
+
+    directory = config.path(config.paths.trentino_model_dir) / config.trentino.version
+    metrics_path = directory / METRICS_FILENAME
+    if not metrics_path.is_file():
+        raise FileNotFoundError(f"No trained model at {metrics_path}. Run `tfire train` first.")
+    metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+
+    frame = pd.read_parquet(config.path(config.paths.dataset_out))
+    features, labels, years = design_matrix(frame, load_registry())
+    if list(features.columns) != list(metrics["columns"]):
+        raise ValueError("The assembled table no longer has the columns the stored model used")
+    train = training_mask(years, config)
+
+    estimator, _, holdout = fit_holdout(
+        SPECS["xgboost"], features, labels, train, config, metrics["tuning"]
+    )
+    check_reproducible(metrics["models"]["xgboost"]["holdout"], scores(labels[~train], holdout))
+
+    path = directory / HOLDOUT_MODEL_FILENAME
+    cast("BoostedEstimator", estimator).save_model(path)
+    logger.info("Wrote the %d-%d fit to %s", years[train].min(), years[train].max(), path)
+    return path
