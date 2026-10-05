@@ -10,7 +10,13 @@ from tfire.config import Config
 from tfire.evaluation import blocked_folds, year_blocks
 from tfire.features.registry import load_registry
 from tfire.models.mesogeos import PROB_COLUMN
-from tfire.models.trentino import SPECS, design_matrix, training_mask
+from tfire.models.trentino import (
+    OBJECTIVES,
+    SPECS,
+    balanced_log_loss,
+    design_matrix,
+    training_mask,
+)
 
 YEARS = list(range(1984, 2015))
 
@@ -120,3 +126,40 @@ def test_model_column_selectors() -> None:
 def test_fwi_only_refuses_a_matrix_without_fwi() -> None:
     with pytest.raises(ValueError, match="not in the design matrix"):
         SPECS["fwi_only"].columns(["elevation_mean", "ndvi"])
+
+
+def test_balanced_log_loss_weighs_each_class_to_one_half() -> None:
+    labels = np.array([1, 0, 0, 0])
+    probabilities = np.array([0.8, 0.1, 0.2, 0.3])
+    expected = -0.5 * (np.log(0.8) + np.mean(np.log([0.9, 0.8, 0.7])))
+    assert balanced_log_loss(labels, probabilities) == pytest.approx(expected)
+
+    # tripling the negatives with the same scores leaves it where it was
+    more = np.array([1, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+    scores_more = np.array([0.8, *[0.1, 0.2, 0.3] * 3])
+    assert balanced_log_loss(more, scores_more) == pytest.approx(expected)
+
+
+def test_fold_objectives_ignore_which_block_has_more_positives() -> None:
+    # two trials with mirrored folds: one strong on the frequent block, one on the rare block
+    frequent, rare = 0.16, 0.03
+
+    def fold(auprc: float, rate: float) -> dict[str, float]:
+        return {"auprc": auprc, "positive_rate": rate, "lift": auprc / rate}
+
+    early = [fold(0.70, frequent), fold(0.09, rare)]
+    late = [fold(0.62, frequent), fold(0.15, rare)]
+    # pooling follows the frequent block, so it prefers the first trial
+    pooled_early, pooled_late = 0.66, 0.60
+
+    pooled = OBJECTIVES["pooled_auprc"]
+    lift = OBJECTIVES["fold_lift"]
+    assert pooled(pooled_early, early) > pooled(pooled_late, late)
+    assert lift(pooled_early, early) < lift(pooled_late, late)
+
+
+def test_every_objective_is_read_larger_better() -> None:
+    folds = [{"lift": 3.0, "auroc": 0.9, "balanced_log_loss": 0.4, "auprc": 0.5}]
+    worse = [{"lift": 2.0, "auroc": 0.8, "balanced_log_loss": 0.6, "auprc": 0.4}]
+    for name, objective in OBJECTIVES.items():
+        assert objective(0.5, folds) > objective(0.4, worse), name

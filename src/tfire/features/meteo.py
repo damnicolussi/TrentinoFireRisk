@@ -37,9 +37,10 @@ _KELVIN_OFFSET: Final = 273.15
 _PA_TO_HPA: Final = 0.01
 _M_TO_MM: Final = 1000.0
 
-# Magnus coefficients over water
+# Magnus coefficients over water, and the saturation vapor pressure at 0 C they go with, hPa
 _MAGNUS_A: Final = 17.625
 _MAGNUS_B: Final = 243.04
+_MAGNUS_E0: Final = 6.1094
 
 # tail of the previous year read alongside each year, so its first local day is whole
 _OVERLAP_HOURS: Final = 48
@@ -65,6 +66,19 @@ NOON_COLUMNS: Final = ("temp_noon", "rh_noon", "wind_speed_noon", "precip_noon24
 
 DIRECTIONS: Final = ("wind_dir_mean", "wind_dir_at_max")
 
+# daily humidity statistics recomputed at each lapse rung, before the lag features add theirs
+RUNG_STATISTICS: Final = ("rh_mean", "rh_min", "rh_max", "rh_noon", "vpd_max")
+
+# kept before the clip at saturation on the rungs. The clip is a kink in the offset, which a
+# line between two rungs cuts across; it commutes with a minimum, a maximum and a single hour,
+# so for these it is applied after the interpolation instead. It does not commute with a mean.
+UNCLIPPED_AT_RUNGS: Final = ("rh_min", "rh_max", "rh_noon")
+
+
+def rung_column(name: str, rung: int) -> str:
+    """The backbone column holding `name` recomputed with temperatures `rung` K warmer."""
+    return f"{name}_dt{rung:+d}"
+
 
 def relative_humidity(
     temp_c: npt.NDArray[np.float64], dewpoint_c: npt.NDArray[np.float64]
@@ -74,9 +88,29 @@ def relative_humidity(
     Belongs at the hourly step: humidity is nonlinear in temperature and dewpoint, so
     feeding it daily means does not give the daily mean humidity.
     """
+    return np.clip(unclipped_humidity(temp_c, dewpoint_c), 0.0, 100.0)
+
+
+def unclipped_humidity(
+    temp_c: npt.NDArray[np.float64], dewpoint_c: npt.NDArray[np.float64]
+) -> npt.NDArray[np.float64]:
+    """The Magnus ratio before the clip at saturation, which reads over 100 below the dewpoint."""
     saturation = _MAGNUS_A * temp_c / (_MAGNUS_B + temp_c)
     actual = _MAGNUS_A * dewpoint_c / (_MAGNUS_B + dewpoint_c)
-    return np.clip(100.0 * np.exp(actual - saturation), 0.0, 100.0)
+    return np.asarray(100.0 * np.exp(actual - saturation))
+
+
+def vapor_pressure_deficit(
+    temp_c: npt.NDArray[np.float64], dewpoint_c: npt.NDArray[np.float64]
+) -> npt.NDArray[np.float64]:
+    """Saturation minus actual vapor pressure, hPa, from the same Magnus fit as the humidity.
+
+    Hourly for the same reason: the deficit is exponential in temperature, so the deficit of
+    a daily mean temperature misses the afternoon peak that dries the fuel.
+    """
+    saturation = _MAGNUS_E0 * np.exp(_MAGNUS_A * temp_c / (_MAGNUS_B + temp_c))
+    actual = _MAGNUS_E0 * np.exp(_MAGNUS_A * dewpoint_c / (_MAGNUS_B + dewpoint_c))
+    return np.maximum(saturation - actual, 0.0)
 
 
 def wind_speed_direction(
@@ -194,6 +228,9 @@ def aggregate_daily(
         columns[f"{name}_max"] = values.max(axis=1)
         columns[f"{name}_range"] = columns[f"{name}_max"] - columns[f"{name}_min"]
 
+    if config.meteo.cell_scale:
+        deficit = vapor_pressure_deficit(fields.temp_c, fields.dewpoint_c)
+        columns["vpd_max"] = block(deficit).max(axis=1)
     columns["precip_sum"] = precip_block.sum(axis=1)
     columns["wind_speed_mean"] = speed_block.mean(axis=1)
     columns["wind_speed_max"] = speed_block.max(axis=1)
@@ -206,6 +243,17 @@ def aggregate_daily(
 
     for layer in SOIL_LAYERS:
         columns[f"{layer}_mean"] = block(getattr(fields, layer)).mean(axis=1)
+
+    for rung in config.meteo.lapse_rungs_k if config.meteo.cell_scale else ():
+        shifted = fields.temp_c + rung
+        ratio = block(unclipped_humidity(shifted, fields.dewpoint_c))
+        columns[rung_column("rh_mean", rung)] = np.clip(ratio, 0.0, 100.0).mean(axis=1)
+        columns[rung_column("rh_min", rung)] = ratio.min(axis=1)
+        columns[rung_column("rh_max", rung)] = ratio.max(axis=1)
+        columns[rung_column("rh_noon", rung)] = ratio[:, NOON_HOUR_LST]
+        columns[rung_column("vpd_max", rung)] = block(
+            vapor_pressure_deficit(shifted, fields.dewpoint_c)
+        ).max(axis=1)
 
     columns["temp_noon"] = blocks["temp"][:, NOON_HOUR_LST]
     columns["rh_noon"] = blocks["rh"][:, NOON_HOUR_LST]
@@ -261,6 +309,25 @@ def trailing_sum(values: npt.NDArray[np.float64], window: int) -> npt.NDArray[np
     return total
 
 
+def days_since_rain(
+    precip: npt.NDArray[np.float64], threshold_mm: float, cap: int
+) -> npt.NDArray[np.float64]:
+    """Days back to the last day with at least `threshold_mm`, zero on that day, at most `cap`.
+
+    Unknown until the series either rains or has run `cap` days dry: before that the last
+    rain may lie before the series began.
+    """
+    counts = np.full(precip.shape, np.nan)
+    running = np.full(precip.shape[1], np.nan)
+    for day in range(precip.shape[0]):
+        running = np.where(precip[day] >= threshold_mm, 0.0, running + 1)
+        if day + 1 >= cap:
+            running = np.where(np.isnan(running), cap, running)
+        running = np.minimum(running, cap)
+        counts[day] = running
+    return counts
+
+
 def add_lag_features(columns: dict[str, npt.NDArray[np.float64]], config: Config) -> None:
     for window in config.meteo.precip_windows:
         columns[f"precip_cum{window}"] = trailing_sum(columns["precip_sum"], window)
@@ -270,6 +337,19 @@ def add_lag_features(columns: dict[str, npt.NDArray[np.float64]], config: Config
         ("rh_mean", config.meteo.rh_window_days),
     ):
         columns[f"{source}_{window}d"] = trailing_sum(columns[source], window) / window
+
+    if not config.meteo.cell_scale:
+        return
+
+    window = config.meteo.rh_window_days
+    for rung in config.meteo.lapse_rungs_k:
+        columns[rung_column(f"rh_mean_{window}d", rung)] = (
+            trailing_sum(columns[rung_column("rh_mean", rung)], window) / window
+        )
+
+    columns["days_since_rain"] = days_since_rain(
+        columns["precip_sum"], config.meteo.rain_day_mm, config.meteo.dry_spell_cap_days
+    )
 
 
 def build_backbone(
@@ -451,10 +531,14 @@ def validate_meteo(meteo: pd.DataFrame, lattice: Lattice, config: Config) -> Non
         "rh_min": (0.0, 100.0),
         "rh_max": (0.0, 100.0),
         "precip_sum": (0.0, config.meteo.max_precip_mm),
+        "vpd_max": (0.0, 100.0),
+        "days_since_rain": (0.0, float(config.meteo.dry_spell_cap_days)),
         "wind_dir_mean": (0.0, 360.0),
         "wind_dir_at_max": (0.0, 360.0),
     }
     for name, (low, high) in bounds.items():
+        if name not in window.columns:
+            continue
         values = window[name]
         outside = int(((values < low) | (values > high)).sum())
         if outside:
@@ -508,5 +592,10 @@ def extract_meteo(config: Config, force: bool = False) -> pd.DataFrame:
     validate_weights(weights, config)
     weights.to_parquet(weights_out, index=False)
     logger.info("Wrote %d rows to %s", len(weights), weights_out)
+
+    if config.meteo.cell_scale:
+        from tfire.features.lapse import extract_lapse
+
+        extract_lapse(config, lattice, weights)
 
     return meteo

@@ -88,7 +88,7 @@ def wired(monkeypatch: pytest.MonkeyPatch, config: Config) -> Config:
     )
     monkeypatch.setattr(FakeScorer, "built_with_holdout", [])
     monkeypatch.setattr(events, "reference_days", lambda _config: sorted(_SCORES))
-    monkeypatch.setattr(events, "_season_window", lambda _config: sorted(_SCORES))
+    monkeypatch.setattr(events, "season_window", lambda _config, month=8: sorted(_SCORES))
     return config
 
 

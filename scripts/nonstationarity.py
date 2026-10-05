@@ -3,8 +3,8 @@
 Writes `reports/nonstationarity.md` and its figures. Three parts: the cadastre and the training
 table described by period, positives always against the same period's negatives; models fitted
 on one period and scored on another, with the v2 hyperparameters; and a classifier asked to tell
-pre-2000 from later ignitions. The choice handed to C2 (cut year, half-life) is taken on
-1984-2014 alone, because 2015-2024 is the holdout C2 is judged on.
+pre-2000 from later ignitions. The recommended cut year and half-life are read off 1984-2014
+alone, because 2015-2024 is the holdout the retrained variants are judged on.
 """
 
 from __future__ import annotations
@@ -108,9 +108,6 @@ def period_of(years: pd.Series) -> pd.Series:
     for period in PERIODS:
         labels[years.between(*period)] = period_label(period)
     return labels
-
-
-# --- description -------------------------------------------------------------------------------
 
 
 def cadastre(config: Config) -> pd.DataFrame:
@@ -271,9 +268,6 @@ def describe(config: Config, dataset: pd.DataFrame) -> dict[str, Any]:
         "negatives": rows[~rows["is_fire"]].groupby("period").size(),
         "fires": fires,
     }
-
-
-# --- cross-period fits -------------------------------------------------------------------------
 
 
 def booster(config: Config, tuning: dict[str, Any], weight: float) -> Estimator:
@@ -559,9 +553,6 @@ def forward_scan(
     return pd.DataFrame(rows)
 
 
-# --- adversarial -------------------------------------------------------------------------------
-
-
 def product_columns(columns: Sequence[str]) -> list[str]:
     registry = load_registry()
     known = {spec.name for spec in registry.features}
@@ -646,9 +637,6 @@ def adversarial_runs(
                 runs[(rows_name, set_name)]["auroc"],
             )
     return runs
-
-
-# --- figures and report ------------------------------------------------------------------------
 
 
 def figures(config: Config, fires: pd.DataFrame, pairs: pd.DataFrame) -> list[str]:
@@ -752,7 +740,7 @@ def recommend(
     matched: dict[tuple[str, str], dict[str, float]],
     scan: pd.DataFrame,
 ) -> dict[str, Any]:
-    """The choice for C2, read off 1984-2014 only."""
+    """The cut year and half-life worth trying, read off 1984-2014 only."""
     early, late = (period_label(p) for p in PERIODS[:2])
     own, carried = matched[(late, late)], matched[(early, late)]
     cut = own["auroc_low"] > carried["auroc_high"]
@@ -783,8 +771,9 @@ def render(results: dict[str, Any]) -> str:
         + ". Positives are always read against the same period's negatives, which are a uniform "
         "draw over the record and so describe the background each period scored against.",
         "",
-        "**Holdout rule.** 2015-2024 is the holdout C2 will be judged on. It is described here "
-        "and appears in the matrix, but the recommendation at the end uses 1984-2014 only.",
+        "**Holdout rule.** 2015-2024 is the holdout retrained variants are judged on. It is "
+        "described here and appears in the matrix, but the recommendation at the end uses "
+        "1984-2014 only.",
         "",
         "## 1. The cadastre by period",
         "",
@@ -1071,7 +1060,7 @@ def render(results: dict[str, Any]) -> str:
     fell = per_year.loc[late] / per_year.loc[early]
     lines += [
         "",
-        "## 5. What C2 should try",
+        "## 5. What a retraining should try",
         "",
         "- **Regime or recording.** Between "
         f"{early} and {late}, fires per year fell in every size class: "
@@ -1091,18 +1080,18 @@ def render(results: dict[str, Any]) -> str:
             "intermediate control."
             if choice["cut_2000"]
             else "The ranges overlap: the older years cost nothing measurable at equal size, so "
-            "a cut at 2000 is a control in C2, not the expected winner."
+            "a cut at 2000 is a control, not the expected winner."
         ),
         f"- **Half-life.** Forward in time, the best recency weighting is "
         f"**{choice['best_half_life']}**, {choice['best_gain']:+.4f} AUROC over no weights "
         "(mean of the two scored blocks), while training from 1994 or 2000 loses "
         f"{choice['cut_loss'][1994]:.3f} and {choice['cut_loss'][2000]:.3f}. "
-        "Pooled AUROC barely moves with recency, so C2 should expect little there and judge the "
-        "variants where the change is, on summer and on the event axis. The planned 5, 10 and "
-        "20 years bracket the result.",
+        "Pooled AUROC barely moves with recency, so a retraining should expect little there and "
+        "judge the variants where the change is, on summer and on the event axis. Half-lives of "
+        "5, 10 and 20 years bracket the result.",
         "- **Not fixable by weights.** Recording changes in the table above (placeholder hours, "
         "tiny fires, polygon detail) move what a positive is, not how much it should count. "
-        "They go to C2 as data notes.",
+        "They are data notes, not a weighting problem.",
         "",
     ]
     return "\n".join(lines)

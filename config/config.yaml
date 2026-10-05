@@ -31,6 +31,8 @@ paths:
   landcover_out: "data/interim/landcover.parquet"
   era5_raw: "data/raw/era5land"
   era5_weights_out: "data/interim/era5_weights.parquet"
+  orography_raw: "data/raw/era5land_invariant/geo_1279l4_0.1x0.1.grib2_v4_unpack.nc"
+  lapse_out: "data/interim/lapse.parquet"
   meteo_out: "data/interim/meteo_daily.parquet"
   fwi_out: "data/interim/fwi.parquet"
   bias_map_out: "data/interim/bias_map.parquet"
@@ -167,6 +169,28 @@ meteo:
   precip_windows: [7, 15, 30]
   temp_window_days: 3
   rh_window_days: 7
+
+  # adds days_since_rain, vpd_max and the *_lapse columns to the backbone and the table. Off,
+  # both are the ones v2 was trained on, bit for bit; `tfire variants cell_meteo` needs it on.
+  cell_scale: false
+
+  # days_since_rain counts back to the last backbone day with at least this much rain, and
+  # stops at the cap. The cap sits under forecast.spinup_days, so a served day counts over
+  # the same history the cached record does and the two paths agree exactly.
+  rain_day_mm: 1.0
+  dry_spell_cap_days: 60
+
+  # the backbone's temperatures are the reanalysis's at its own terrain height. A cell's
+  # *_lapse columns move them to the cell's mean height at this rate, and recompute humidity
+  # and vapor pressure deficit hour by hour at the same dewpoint. The height comes from the
+  # invariant geopotential ERA5-Land was run with, on its own lattice.
+  orography_url: "https://confluence.ecmwf.int/download/attachments/140385202/geo_1279l4_0.1x0.1.grib2_v4_unpack.nc?version=1&modificationDate=1591983422208&api=v2"
+  lapse_rate_k_per_km: 6.5
+
+  # temperature offsets, K, at which each backbone cell's hourly humidity is recomputed. A cell
+  # interpolates linearly between the two around its own offset; the cells run from -9.7 to
+  # +7.2 K, and at 2 K spacing the interpolation is off by well under one RH point.
+  lapse_rungs_k: [-10, -8, -6, -4, -2, 0, 2, 4, 6, 8]
 
   # plausibility bounds for the daily aggregates.
   min_temp_c: -45.0
@@ -334,6 +358,12 @@ trentino:
   cv_folds: 5
 
   optuna_trials: 100
+  # what Optuna ranks trials by. pooled_auprc is what v1 and v2 were tuned on; fold_lift,
+  # fold_logloss and fold_auroc average over the year blocks instead.
+  tuning_objective: "pooled_auprc"
+  # the bounds Optuna searches. v2 is what v1 and v2 were tuned in; v3 opens colsample_bytree
+  # down to 0.1 and adds colsample_bynode.
+  search_space: "v2"
   early_stopping_rounds: 50
   max_estimators: 2000
 

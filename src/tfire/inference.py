@@ -20,6 +20,7 @@ from tfire.datasets import interpolate_meteo, nearest_backbone
 from tfire.features.fwi import INDEX_NAMES, compute_fwi
 from tfire.features.human import calendar_features
 from tfire.features.landcover import nearest_edition
+from tfire.features.lapse import apply_lapse
 from tfire.features.meteo import NOON_COLUMNS, add_lag_features, aggregate_daily, to_frame
 from tfire.features.registry import Registry, load_registry
 from tfire.features.vegetation import operational_window, preceding_month
@@ -210,10 +211,10 @@ def _backbone_daily(config: Config, plan: Plan, lattice: Lattice) -> pd.DataFram
     """Daily aggregates and FWI on the backbone, covering every day of the plan."""
     if plan.meteo_from_cache:
         wanted = pd.to_datetime(sorted(plan.days))
-        meteo = pd.read_parquet(config.path(config.paths.meteo_out))
-        fwi = pd.read_parquet(config.path(config.paths.fwi_out))
-        meteo = meteo[meteo["date"].isin(wanted)]
-        fwi = fwi[fwi["date"].isin(wanted)]
+        # the backbone table carries every day since 1983, so only the wanted ones are read
+        days = [("date", "in", list(wanted))]
+        meteo = pd.read_parquet(config.path(config.paths.meteo_out), filters=days)
+        fwi = pd.read_parquet(config.path(config.paths.fwi_out), filters=days)
         return meteo.merge(fwi, on=["era5_id", "date"], how="left", validate="1:1")
 
     first = min(piece.start for piece in plan.segments)
@@ -270,6 +271,7 @@ def static_frame(config: Config, day: date) -> pd.DataFrame:
         config.paths.topography_out,
         config.paths.geography_out,
         config.paths.human_out,
+        *([config.paths.lapse_out] if config.meteo.cell_scale else []),
     ):
         block = pd.read_parquet(config.path(relative))
         frame = frame.merge(block, on="cell_id", how="left", validate="1:1")
@@ -321,6 +323,8 @@ def assemble_day(
         how="left",
         validate="1:1",
     )
+    if config.meteo.cell_scale:
+        frame = apply_lapse(frame, config)
 
     codes = daily[["era5_id", *INDEX_NAMES]]
     frame = frame.merge(nearest_backbone(weights), on="cell_id", how="left", validate="m:1")
@@ -373,7 +377,8 @@ def score(
 ) -> Scores:
     """Estimator score, population-rate probability, and rank within the day, per row."""
     features, _, _ = design_matrix(frame.assign(is_fire=False), registry)
-    aligned = align_columns(features, columns)
+    declared = {spec.name for spec in registry.features}
+    aligned = align_columns(features, columns, declared)
 
     raw = np.asarray(estimator.predict_proba(aligned)[:, 1], dtype="float64")
     return Scores(raw, calibrator.to_population_rate(raw), within_day_rank(raw))
@@ -479,6 +484,12 @@ class GridScorer:
         self._vegetation: dict[date, pd.DataFrame] = {}
 
     def day(self, day: date) -> DayScores:
+        frame = self.frame(day)
+        scored = score(frame, self.registry, self.estimator, self.columns, self.calibrator)
+        return DayScores(frame, *scored)
+
+    def frame(self, day: date) -> pd.DataFrame:
+        """The day's assembled feature table, before any model sees it."""
         stamp = pd.Series([pd.Timestamp(day)])
         key = (
             int(nearest_edition(stamp, self.config.corine.editions).iloc[0]),
@@ -500,8 +511,7 @@ class GridScorer:
             self._vegetation[composite],
         )
         check_contract(frame, self.registry, day)
-        scored = score(frame, self.registry, self.estimator, self.columns, self.calibrator)
-        return DayScores(frame, *scored)
+        return frame
 
 
 def predict_days(

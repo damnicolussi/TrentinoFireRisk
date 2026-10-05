@@ -369,6 +369,18 @@ def episodes_command(
         raise typer.Exit(code=1) from error
 
 
+@app.command("variants")
+def variants_command(
+    step: Annotated[str, typer.Argument(help="Variant set to run, such as recency.")],
+    config: ConfigOption = None,
+    force: ForceOption = False,
+) -> None:
+    """Fit a set of retraining variants at v2's settings and read them on the same axes."""
+    from tfire.models.variants import run_set
+
+    run_set(_start(config), step, force)
+
+
 @app.command("serve")
 def serve_command(
     config: ConfigOption = None,

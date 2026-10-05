@@ -16,6 +16,12 @@ def config() -> Config:
     return load_config()
 
 
+@pytest.fixture(scope="session")
+def cell_config(config: Config) -> Config:
+    """The configuration with the cell-scale meteorology switched on."""
+    return config.model_copy(update={"meteo": config.meteo.model_copy(update={"cell_scale": True})})
+
+
 def requires_built(config: Config, *relative: Path) -> None:
     """Skip when an artifact the pipeline produces is absent."""
     for path in (config.path(item) for item in relative):

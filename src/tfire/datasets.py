@@ -13,6 +13,7 @@ import pandas as pd
 from tfire.config import Config
 from tfire.features.human import calendar_features
 from tfire.features.landcover import nearest_edition
+from tfire.features.lapse import apply_lapse
 from tfire.features.registry import Registry, load_registry, validate_frame
 from tfire.features.vegetation import preceding_composite
 from tfire.models.mesogeos import MODEL_FILENAME, PROB_COLUMN, predict_prob
@@ -155,6 +156,9 @@ def assemble(config: Config) -> pd.DataFrame:
     weights = _read(config, config.paths.era5_weights_out)
     meteo = _read(config, config.paths.meteo_out)
     samples = _join(samples, interpolate_meteo(samples, weights, meteo), ["sample_id"])
+    if config.meteo.cell_scale:
+        lapse = _read(config, config.paths.lapse_out)
+        samples = apply_lapse(_join(samples, lapse, ["cell_id"]), config)
 
     samples = _join(samples, nearest_backbone(weights), ["cell_id"])
     samples = _join(samples, _read(config, config.paths.fwi_out), ["era5_id", "date"])

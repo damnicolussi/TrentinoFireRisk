@@ -69,6 +69,8 @@ class PathsConfig(BaseModel):
     landcover_out: Path
     era5_raw: Path
     era5_weights_out: Path
+    orography_raw: Path
+    lapse_out: Path
     meteo_out: Path
     fwi_out: Path
     bias_map_out: Path
@@ -200,6 +202,12 @@ class MeteoConfig(BaseModel):
     min_pressure_hpa: float = Field(gt=0)
     max_pressure_hpa: float = Field(gt=0)
     max_precip_mm: float = Field(gt=0)
+    cell_scale: bool = False
+    rain_day_mm: float = Field(gt=0)
+    dry_spell_cap_days: int = Field(gt=0)
+    orography_url: str
+    lapse_rate_k_per_km: float = Field(gt=0)
+    lapse_rungs_k: list[int] = Field(min_length=2)
 
     @model_validator(mode="after")
     def check_ordering(self) -> MeteoConfig:
@@ -212,6 +220,10 @@ class MeteoConfig(BaseModel):
                 f"max_pressure_hpa ({self.max_pressure_hpa}) must exceed "
                 f"min_pressure_hpa ({self.min_pressure_hpa})"
             )
+        if self.lapse_rungs_k != sorted(set(self.lapse_rungs_k)) or 0 not in self.lapse_rungs_k:
+            raise ValueError(
+                f"lapse_rungs_k must increase strictly and include 0, got {self.lapse_rungs_k}"
+            )
         if any(window < 1 for window in self.precip_windows):
             raise ValueError(f"precip_windows must be positive, got {self.precip_windows}")
         return self
@@ -219,7 +231,12 @@ class MeteoConfig(BaseModel):
     @property
     def longest_window_days(self) -> int:
         """Days of history the lag features need before the first emitted day."""
-        return max(*self.precip_windows, self.temp_window_days, self.rh_window_days)
+        return max(
+            *self.precip_windows,
+            self.temp_window_days,
+            self.rh_window_days,
+            self.dry_spell_cap_days,
+        )
 
 
 class HistoryConfig(BaseModel):
@@ -364,6 +381,10 @@ class TrentinoConfig(BaseModel):
     danger_reference_stride: int = Field(gt=0)
     cv_folds: int = Field(gt=1)
     optuna_trials: int = Field(gt=0)
+    tuning_objective: Literal["pooled_auprc", "fold_lift", "fold_logloss", "fold_auroc"] = (
+        "pooled_auprc"
+    )
+    search_space: Literal["v2", "v3"] = "v2"
     early_stopping_rounds: int = Field(gt=0)
     max_estimators: int = Field(gt=0)
     random_forest: RandomForestConfig

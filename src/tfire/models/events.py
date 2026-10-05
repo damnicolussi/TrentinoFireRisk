@@ -23,14 +23,14 @@ _SHARE_AT: Final = (0.90, 0.99)
 
 # the variance diagnostic scores one holdout day in this many, which keeps it around a year of
 # days: enough to separate a fixed cell effect from a day effect, cheap enough to run per variant
-_VARIANCE_STRIDE: Final = 10
+VARIANCE_STRIDE: Final = 10
 
 # the same diagnostic over a run of consecutive days in one fire season. The two answer different
 # questions and give very different numbers: spread over a decade the weather moves a great deal
 # and the cell effect looks small, while inside one August almost the only thing that separates
 # two cells is what they are, which is exactly the window an operator compares maps in.
-_WINDOW_DAYS: Final = 15
-_WINDOW_MONTH: Final = 8
+WINDOW_DAYS: Final = 15
+WINDOW_MONTH: Final = 8
 
 
 def ignition_events(config: Config) -> pd.DataFrame:
@@ -57,7 +57,7 @@ def _shares(percentiles: npt.NDArray[np.float64]) -> dict[str, float]:
     }
 
 
-def _aggregate(frame: pd.DataFrame) -> dict[str, Any]:
+def aggregate_percentiles(frame: pd.DataFrame) -> dict[str, Any]:
     percentiles = frame["within_day_percentile"].to_numpy(dtype="float64")
     return {
         "events": int(len(frame)),
@@ -138,8 +138,8 @@ def verify_events(config: Config, classes: DangerClasses | None = None) -> dict[
 
     stamps = pd.DatetimeIndex(events["date"])
     event_days = set(stamps.date)
-    variance_days = set(reference_days(config)[::_VARIANCE_STRIDE])
-    window_days = set(_season_window(config))
+    variance_days = set(reference_days(config)[::VARIANCE_STRIDE])
+    window_days = set(season_window(config))
     wanted = sorted(event_days | variance_days | window_days)
 
     scorer = GridScorer(config, wanted, holdout=True)
@@ -197,18 +197,18 @@ def verify_events(config: Config, classes: DangerClasses | None = None) -> dict[
         "model": f"fit on {config.date_range.start.year}-{last_training_year} only",
         "years": [config.trentino.test_years_start, config.date_range.end.year],
         "days_scored": days_scored,
-        "overall": _aggregate(scored),
+        "overall": aggregate_percentiles(scored),
         "by_season": {
-            str(season): _aggregate(part)
+            str(season): aggregate_percentiles(part)
             for season, part in scored.groupby("season", observed=True)
         },
         "baseline": {
             "name": "fire-history density, "
             f"{config.history.bandwidth_m / 1000:g} km kernel, "
             f"{config.date_range.start.year}-{last_training_year}",
-            "overall": _aggregate(baseline),
+            "overall": aggregate_percentiles(baseline),
             "by_season": {
-                str(season): _aggregate(part)
+                str(season): aggregate_percentiles(part)
                 for season, part in baseline.groupby("season", observed=True)
             },
         },
@@ -223,8 +223,11 @@ def verify_events(config: Config, classes: DangerClasses | None = None) -> dict[
     }
 
 
-def _season_window(config: Config) -> list[date]:
-    """A run of consecutive days in the last holdout August, for the within-season split."""
+def season_window(config: Config, month: int = WINDOW_MONTH) -> list[date]:
+    """A run of consecutive days in one month of the last holdout year, for the within-season split.
+
+    August by default, the month an operator compares maps in.
+    """
     year = config.date_range.end.year
-    first = date(year, _WINDOW_MONTH, 1)
-    return [first + timedelta(days=offset) for offset in range(_WINDOW_DAYS)]
+    first = date(year, month, 1)
+    return [first + timedelta(days=offset) for offset in range(WINDOW_DAYS)]

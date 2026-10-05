@@ -39,6 +39,8 @@ SHORT_NAMES: Final[dict[str, str]] = {
     "10m_v_component_of_wind": "v10",
     "volumetric_soil_water_layer_1": "swvl1",
     "volumetric_soil_water_layer_2": "swvl2",
+    "snow_cover": "snowc",
+    "snow_depth": "sde",
 }
 
 RESOLUTION_DEG: Final = 0.1
@@ -55,6 +57,8 @@ GEE_BANDS: Final[dict[str, str]] = {
     "10m_v_component_of_wind": "v_component_of_wind_10m",
     "volumetric_soil_water_layer_1": "volumetric_soil_water_layer_1",
     "volumetric_soil_water_layer_2": "volumetric_soil_water_layer_2",
+    "snow_cover": "snow_cover",
+    "snow_depth": "snow_depth",
 }
 
 # `getDownloadURL` refuses more bands than this, and one window carries hours x variables
@@ -360,15 +364,27 @@ def _fetch_half(config: Config, lattice: Lattice, year: int, half: int) -> list[
     return _write_half(config, lattice, times, np.concatenate(blocks), year, half)
 
 
-def fetch_era5(config: Config, years: list[int], force: bool = False) -> list[Path]:
-    """Download every variable and half-year, skipping what is already cached."""
+def fetch_era5(
+    config: Config,
+    years: list[int],
+    force: bool = False,
+    halves: list[tuple[int, int]] | None = None,
+) -> list[Path]:
+    """Download every variable and half-year, skipping what is already cached.
+
+    `halves` narrows the request to those half-years of `years`, for a pilot.
+    """
     import ee
 
     unknown = sorted(set(config.meteo.variables) - set(GEE_BANDS))
     if unknown:
         raise ValueError(f"No Earth Engine band known for {unknown}; extend GEE_BANDS")
 
-    wanted = [(year, half) for year, half in fetch_halves(config) if year in set(years)]
+    wanted = [
+        (year, half)
+        for year, half in fetch_halves(config)
+        if year in set(years) and (halves is None or (year, half) in halves)
+    ]
     targets = [
         cache_path(config, variable, year, half)
         for year, half in wanted

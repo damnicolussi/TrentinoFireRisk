@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 
 import numpy as np
@@ -18,7 +19,7 @@ from tfire.models.trentino import align_columns
 from tfire.raster import read_cell_bands, write_cell_bands
 from tfire.sources.forecast import ForecastError, plan_span, spinup_window
 
-from .conftest import requires_built
+from .conftest import requires_built, requires_model
 from .test_meteo import hourly
 
 TODAY = date(2026, 8, 16)
@@ -83,6 +84,17 @@ def test_a_single_day_aligns_onto_the_stored_columns() -> None:
     assert list(aligned.columns) == stored
     assert aligned["season_summer"].tolist() == [1.0, 1.0]
     assert aligned["season_winter"].tolist() == [0.0, 0.0]
+
+
+def test_a_declared_feature_the_model_never_saw_is_dropped_not_scored() -> None:
+    """An older model keeps serving after the registry grows a column."""
+    features = pd.DataFrame({"fwi": [1.0], "season_summer": [1.0], "vpd_max": [9.0]})
+
+    aligned = align_columns(features, ["fwi", "season_summer"], declared={"fwi", "vpd_max"})
+
+    assert list(aligned.columns) == ["fwi", "season_summer"]
+    with pytest.raises(ValueError, match="undeclared"):
+        align_columns(features, ["fwi", "season_summer"], declared={"fwi"})
 
 
 @pytest.mark.parametrize(
@@ -250,7 +262,7 @@ def test_the_day_rank_breaks_the_calibrators_ties_without_reordering_it(
             return np.column_stack([1 - raw, raw])
 
     monkeypatch.setattr(tfire.inference, "design_matrix", lambda frame, _r: (frame, None, None))
-    monkeypatch.setattr(tfire.inference, "align_columns", lambda features, _c: features)
+    monkeypatch.setattr(tfire.inference, "align_columns", lambda features, _c, _d=(): features)
 
     # flat below 0.3 and above 0.6: two plateaus that swallow most of the cells
     stepped = Calibrator(
@@ -262,7 +274,7 @@ def test_the_day_rank_breaks_the_calibrators_ties_without_reordering_it(
     )
     scored = tfire.inference.score(
         pd.DataFrame(index=range(raw.size)),
-        cast("Registry", None),
+        cast("Registry", SimpleNamespace(features=[])),
         cast("Estimator", Stub()),
         [],
         stepped,
@@ -289,3 +301,29 @@ def test_a_day_drawn_on_the_forecast_is_redrawn_once_the_archive_reaches_it(
     assert not superseded_by_archive(config, archive_end + timedelta(days=1), sources, today)
     assert not superseded_by_archive(config, date(2026, 9, 20), sources, today)
     assert not superseded_by_archive(config, date(2026, 9, 24), ["cached"], today)
+
+
+@pytest.mark.parametrize(
+    "day", [date(1990, 2, 24), date(2019, 1, 26)], ids=["busiest day", "holdout day"]
+)
+def test_the_operational_day_reproduces_the_training_rows(config: Config, day: date) -> None:
+    """Every feature of every sampled cell, rebuilt by the serving path, to the last bit."""
+    from tfire.features.registry import load_registry
+    from tfire.inference import GridScorer
+
+    requires_built(config, config.paths.dataset_out, config.paths.meteo_out)
+    requires_model(config)
+    table = pd.read_parquet(config.path(config.paths.dataset_out))
+    rows = table[table["date"] == pd.Timestamp(day)].set_index("cell_id")
+    served = GridScorer(config, [day]).frame(day).set_index("cell_id").loc[rows.index]
+
+    names = [spec.name for spec in load_registry().features if spec.name in rows.columns]
+    assert set(names) <= set(served.columns)
+    for name in names:
+        expected, actual = rows[name], served[name]
+        if expected.dtype.kind == "f":
+            np.testing.assert_array_equal(
+                actual.to_numpy("float32"), expected.to_numpy("float32"), err_msg=name
+            )
+        else:
+            assert actual.astype(str).tolist() == expected.astype(str).tolist(), name

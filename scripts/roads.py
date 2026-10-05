@@ -20,13 +20,19 @@ import geopandas as gpd
 import numpy as np
 import numpy.typing as npt
 import pandas as pd
-from shapely.geometry.base import BaseGeometry
 
 from tfire.config import Config, load_config, setup_logging
 from tfire.features.human import calendar_features
 from tfire.features.registry import load_registry
 from tfire.grid import load_grid
 from tfire.models.explain import registry_name
+from tfire.models.roads import (
+    CORRIDOR_M,
+    ROADS,
+    major_roads,
+    observed_against_expected,
+    road_geometry,
+)
 from tfire.models.trentino import align_columns, design_matrix
 from tfire.report import table
 
@@ -34,13 +40,9 @@ logger = logging.getLogger("roads")
 
 REPORT_FILENAME = "roads.md"
 
-ROADS = ("SS349", "SS612", "SS42")
-MAJOR_CLASSES = ("motorway", "trunk", "primary", "secondary")
-
-# a corridor is the cells within this of the road; its flanks are cells 1-3 km away, at least
+# a corridor is the cells within CORRIDOR_M of the road; its flanks are cells 1-3 km away, at least
 # 1 km from any major road and within 150 m of elevation, so the comparison is road against
 # hillside rather than valley floor against mountain
-CORRIDOR_M = 1000.0
 NEAR_M = 350.0
 FLANK_M = (1000.0, 3000.0)
 FLANK_ELEVATION_M = 150.0
@@ -50,24 +52,6 @@ PERIODS = ((1984, 1993), (1994, 2003), (2004, 2014), (2015, 2024))
 SHAP_DAYS = (date(2024, 3, 20), date(2024, 8, 15))
 EXPECTED_STRIDE_DAYS = 7
 LIGHTNING_CODE = 10
-
-
-def major_roads(config: Config) -> gpd.GeoDataFrame:
-    from tfire.sources.osm import LINE_TAGS, _bbox, _configure_cache, _features_from_bbox
-
-    _configure_cache(config)
-    raw = _features_from_bbox(_bbox(config), LINE_TAGS["roads"])
-    kept = raw[raw["highway"].str.removesuffix("_link").isin(MAJOR_CLASSES)]
-    lines = kept[kept.geometry.geom_type.isin(("LineString", "MultiLineString"))]
-    return gpd.GeoDataFrame(lines[["highway", "ref"]], geometry=lines.geometry, crs=raw.crs).to_crs(
-        config.crs
-    )
-
-
-def road_geometry(roads: gpd.GeoDataFrame, ref: str) -> BaseGeometry:
-    # a way can carry two refs where routes share a carriageway, "SS349;SS350"
-    tokens = roads["ref"].fillna("").str.split(";")
-    return roads[tokens.apply(lambda refs: ref in refs)].geometry.union_all()
 
 
 def ignitions(config: Config) -> pd.DataFrame:
@@ -97,35 +81,6 @@ def expected_mass(config: Config, cells: pd.Index) -> npt.NDArray[np.float64]:
         if index and index % 100 == 0:
             logger.info("  expected: %d/%d days", index, len(days))
     return np.asarray(mass.reindex(cells).fillna(0.0), dtype="float64")
-
-
-def poisson_p(observed: int, expected: float) -> float:
-    """Two-sided exact Poisson p-value, as twice the smaller tail."""
-    from scipy.stats import poisson
-
-    low = poisson.cdf(observed, expected)
-    high = poisson.sf(observed - 1, expected)
-    return float(min(1.0, 2 * min(low, high)))
-
-
-def observed_against_expected(
-    distance: npt.NDArray[np.float64],
-    positions: npt.NDArray[np.int64],
-    years: npt.NDArray[np.int64],
-    mass: npt.NDArray[np.float64],
-    first_test_year: int,
-) -> dict[str, Any]:
-    recent = years >= first_test_year
-    inside = distance[positions] < CORRIDOR_M
-    observed = int((inside & recent).sum())
-    expected = float(mass[distance < CORRIDOR_M].sum() / mass.sum() * recent.sum())
-    record = float(inside.sum() / len(positions) / ((distance < CORRIDOR_M).mean()))
-    return {
-        "expected": expected,
-        "observed": observed,
-        "p": poisson_p(observed, expected),
-        "record_density": record,
-    }
 
 
 def by_period(

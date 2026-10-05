@@ -9,13 +9,16 @@ import xarray as xr
 from tfire.config import Config
 from tfire.features.meteo import (
     HOURS_PER_DAY,
+    add_lag_features,
     aggregate_daily,
     bilinear_weights,
     circular_mean,
+    days_since_rain,
     deaccumulate,
     era5_hourly,
     relative_humidity,
     trailing_sum,
+    vapor_pressure_deficit,
     wind_speed_direction,
 )
 from tfire.sources.era5land import Lattice, half_months
@@ -183,6 +186,86 @@ def test_wind_speed_is_derived_hourly_then_averaged(config: Config) -> None:
 
     assert columns["wind_speed_mean"][0, 0] == pytest.approx(5.0)
     assert abs(np.hypot(u[23:47].mean(), 0.0)) < 1.0
+
+
+@pytest.mark.parametrize(
+    ("temp_c", "dewpoint_c", "expected"),
+    [
+        (20.0, 20.0, 0.0),
+        # 23.34 hPa saturated at 20 C against 12.26 hPa actual at a 10 C dewpoint
+        (20.0, 10.0, 11.07),
+        (5.0, 9.0, 0.0),
+    ],
+    ids=["saturated", "reference pair", "supersaturated"],
+)
+def test_vapor_pressure_deficit_from_temperature_and_dewpoint(
+    temp_c: float, dewpoint_c: float, expected: float
+) -> None:
+    deficit = vapor_pressure_deficit(np.array([temp_c]), np.array([dewpoint_c]))
+    assert deficit[0] == pytest.approx(expected, abs=0.01)
+
+
+def test_the_deficit_peak_is_derived_hourly_then_maximized(cell_config: Config) -> None:
+    # the same swing as the humidity test: the deficit of the daily mean misses the afternoon
+    swing = 15.0 + 15.0 * np.sin(np.arange(48) * 2 * np.pi / HOURS_PER_DAY)
+    dataset = hourly(48, t2m=273.15 + swing, d2m=273.15 + 5.0)
+
+    _, columns = aggregate_daily(era5_hourly(dataset), cell_config)
+
+    hours = swing[23:47]
+    hourly_peak = vapor_pressure_deficit(hours, np.full(hours.size, 5.0)).max()
+    from_daily_max = vapor_pressure_deficit(np.array([hours.max()]), np.array([5.0]))[0]
+    from_daily_mean = vapor_pressure_deficit(np.array([hours.mean()]), np.array([5.0]))[0]
+
+    assert columns["vpd_max"][0, 0] == pytest.approx(hourly_peak)
+    assert hourly_peak == pytest.approx(from_daily_max)
+    assert hourly_peak - from_daily_mean > 10.0
+
+
+def test_days_since_rain_counts_from_the_last_wet_day_and_stops_at_the_cap() -> None:
+    precip = np.zeros((10, 3))
+    precip[2, 0] = 5.0
+    precip[5, 0] = 0.4  # under the threshold, still a dry day
+    precip[0, 1] = 1.0
+
+    counts = days_since_rain(precip, threshold_mm=1.0, cap=4)
+
+    # unknown until it rains or has been dry for the whole cap
+    np.testing.assert_array_equal(counts[:2, 0], [np.nan, np.nan])
+    np.testing.assert_array_equal(counts[2:, 0], [0, 1, 2, 3, 4, 4, 4, 4])
+    np.testing.assert_array_equal(counts[:, 1], [0, 1, 2, 3, 4, 4, 4, 4, 4, 4])
+    np.testing.assert_array_equal(counts[:, 2], [np.nan] * 3 + [4] * 7)
+
+
+def test_a_short_history_gives_the_same_count_once_it_covers_the_cap() -> None:
+    """The served path starts from a spin-up, the cache from the whole record."""
+    rng = np.random.default_rng(0)
+    precip = np.where(rng.uniform(size=(400, 20)) < 0.08, 3.0, 0.0)
+    cap = 60
+
+    whole = days_since_rain(precip, 1.0, cap)
+    for start in (0, 37, 250):
+        served = days_since_rain(precip[start:], 1.0, cap)
+        np.testing.assert_array_equal(served[cap - 1 :], whole[start + cap - 1 :])
+
+
+def test_the_dry_spell_cap_fits_inside_the_served_spin_up(config: Config) -> None:
+    assert config.meteo.dry_spell_cap_days <= config.forecast.spinup_days
+
+
+def test_with_cell_scale_off_the_backbone_carries_only_what_v2_was_fitted_on(
+    config: Config, cell_config: Config
+) -> None:
+    dataset = hourly(72)
+    _, off = aggregate_daily(era5_hourly(dataset), config)
+    add_lag_features(off, config)
+    _, on = aggregate_daily(era5_hourly(dataset), cell_config)
+    add_lag_features(on, cell_config)
+
+    added = set(on) - set(off)
+    assert {"vpd_max", "days_since_rain"} <= added
+    assert not {"vpd_max", "days_since_rain"} & set(off)
+    assert all(name in {"vpd_max", "days_since_rain"} or "_dt" in name for name in added)
 
 
 @pytest.mark.parametrize("window", [7, 15, 30], ids=["7d", "15d", "30d"])

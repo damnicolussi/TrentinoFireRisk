@@ -257,6 +257,38 @@ categories:
       temp_mean_3d: {min: "config:meteo.min_temp_c", max: "config:meteo.max_temp_c"}
       rh_mean_7d: {min: 0.0, max: 100.0}
 
+  # present only with meteo.cell_scale on
+  meteo_cell:
+    source: "ERA5-Land at the cell's scale: the dry spell and the hourly vapor pressure deficit on
+      the backbone, then temperatures moved to the cell's mean height by the lapse rate times
+      its height above the bilinear backbone orography, humidity and deficit recomputed hourly
+      at constant dewpoint"
+    provider: "ERA5-Land (ECMWF), invariant geopotential"
+    period: "1984 to 2026, hourly to daily"
+    resolution: "500 m offsets on the 0.1 degree backbone"
+    license: "Copernicus, free and open"
+    url: "https://confluence.ecmwf.int/display/CKB/ERA5-Land%3A+data+documentation"
+    temporal: dynamic
+    forecastable: true
+    dtype: float32
+    optional: true
+    columns:
+      # hourly vapor pressure deficit from temperature and dewpoint, the day's maximum, hPa
+      vpd_max: {min: 0.0, max: 100.0}
+      days_since_rain: {min: 0.0, max: "config:meteo.dry_spell_cap_days"}
+      temp_mean_lapse: {min: "config:meteo.min_temp_c", max: "config:meteo.max_temp_c"}
+      temp_min_lapse: {min: "config:meteo.min_temp_c", max: "config:meteo.max_temp_c"}
+      temp_max_lapse: {min: "config:meteo.min_temp_c", max: "config:meteo.max_temp_c"}
+      temp_noon_lapse: {min: "config:meteo.min_temp_c", max: "config:meteo.max_temp_c"}
+      temp_mean_3d_lapse: {min: "config:meteo.min_temp_c", max: "config:meteo.max_temp_c"}
+      rh_mean_lapse: {min: 0.0, max: 100.0}
+      rh_min_lapse: {min: 0.0, max: 100.0}
+      rh_max_lapse: {min: 0.0, max: 100.0}
+      rh_noon_lapse: {min: 0.0, max: 100.0}
+      vpd_max_lapse: {min: 0.0, max: 100.0}
+      rh_mean_7d_lapse: {min: 0.0, max: 100.0}
+      rh_range_lapse: {min: 0.0, max: 100.0}
+
   fwi:
     source: "Canadian FWI on the ERA5-Land backbone, nearest cell"
     provider: "Canadian Forest Fire Weather Index"

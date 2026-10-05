@@ -46,6 +46,10 @@ def runtime_paths(config: Config) -> dict[Path, bool]:
         paths.human_out,
         paths.human_population_out,
         paths.era5_weights_out,
+        *(
+            # the per-cell lapse offsets; the orography they come from is build time only
+            [paths.lapse_out] if config.meteo.cell_scale else []
+        ),
         paths.meteo_out,
         paths.fwi_out,
         # the historical-fires layer and the boundary outline are part of the public map, not
