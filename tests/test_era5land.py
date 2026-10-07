@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+
 import numpy as np
 import pytest
 import rasterio
 from rasterio.transform import Affine
 
 from tfire.config import Config
+from tfire.sources import era5land
 from tfire.sources.era5land import (
     MAX_GEE_BANDS,
     Lattice,
@@ -62,11 +65,11 @@ def test_windows_tile_a_half_year_exactly_once(config: Config, year: int, half: 
 
     span = config.meteo.gee_window_hours
     assert all((end - start).total_seconds() / 3600 <= span for start, end in spans)
-    assert span * len(config.meteo.variables) <= MAX_GEE_BANDS
+    assert span * len(config.meteo.fetched_variables) <= MAX_GEE_BANDS
 
 
 def test_windows_reject_a_span_over_the_band_cap(config: Config) -> None:
-    oversized = MAX_GEE_BANDS // len(config.meteo.variables) + 1
+    oversized = MAX_GEE_BANDS // len(config.meteo.fetched_variables) + 1
     with pytest.raises(ValueError, match="over Earth Engine's limit"):
         windows(tweak(config, gee_window_hours=oversized), 2000, 1)
 
@@ -105,3 +108,29 @@ def test_crop_indices_rejects_a_raster_missing_a_lattice_point(config: Config) -
     lattice = bbox_lattice(config)
     with pytest.raises(ValueError, match="latitudes"):
         crop_indices(Affine(0.1, 0, 10.35, 0, -0.1, 46.75), 18, 6, lattice)
+
+
+def test_a_half_drawn_from_two_collections_keeps_the_configured_variable_order(
+    monkeypatch: pytest.MonkeyPatch, config: Config
+) -> None:
+    variables = ["2m_temperature", "convective_available_potential_energy", "total_precipitation"]
+    mixed = tweak(config, variables=variables)
+    lattice = Lattice(np.array([46.2, 46.1]), np.array([11.0, 11.1]))
+    hours = half_hours(2003, 2)
+    first = datetime(2003, 7, 1)
+    stamps = [(first + timedelta(hours=h)).strftime("%Y%m%dT%H") for h in range(hours)]
+
+    def fetched(
+        _config: Config, _lattice: Lattice, _year: int, _half: int, names: list[str]
+    ) -> tuple[list[str], np.ndarray]:
+        codes = np.array([variables.index(name) for name in names], dtype="float32")
+        return stamps, np.broadcast_to(codes[None, :, None, None], (hours, len(names), 2, 2))
+
+    written: dict[str, np.ndarray] = {}
+    monkeypatch.setattr(era5land, "_fetch_collection", fetched)
+    monkeypatch.setattr(
+        era5land, "_write_half", lambda *args: written.setdefault("values", args[3])
+    )
+    era5land._fetch_half(mixed, lattice, 2003, 2, variables)
+
+    assert [float(written["values"][0, v, 0, 0]) for v in range(3)] == [0.0, 1.0, 2.0]

@@ -208,6 +208,9 @@ class MeteoConfig(BaseModel):
     orography_url: str
     lapse_rate_k_per_km: float = Field(gt=0)
     lapse_rungs_k: list[int] = Field(min_length=2)
+    convection: bool = False
+    convection_variables: list[str] = Field(min_length=1)
+    cape_lag_days: int = Field(gt=0)
 
     @model_validator(mode="after")
     def check_ordering(self) -> MeteoConfig:
@@ -229,6 +232,11 @@ class MeteoConfig(BaseModel):
         return self
 
     @property
+    def fetched_variables(self) -> list[str]:
+        """What the backbone downloads: ERA5-Land's fields, then ERA5's when convection is on."""
+        return [*self.variables, *(self.convection_variables if self.convection else [])]
+
+    @property
     def longest_window_days(self) -> int:
         """Days of history the lag features need before the first emitted day."""
         return max(
@@ -236,6 +244,7 @@ class MeteoConfig(BaseModel):
             self.temp_window_days,
             self.rh_window_days,
             self.dry_spell_cap_days,
+            self.cape_lag_days,
         )
 
 

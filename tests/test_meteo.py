@@ -16,6 +16,7 @@ from tfire.features.meteo import (
     days_since_rain,
     deaccumulate,
     era5_hourly,
+    preceding_max,
     relative_humidity,
     trailing_sum,
     vapor_pressure_deficit,
@@ -319,3 +320,18 @@ def test_bilinear_weights_place_a_point_on_the_backbone(
         if weight > 0
     }
     assert placed == pytest.approx(expected)
+
+
+def test_the_cape_lag_looks_only_at_the_days_before() -> None:
+    cape = np.array([[100.0], [900.0], [200.0], [50.0], [0.0], [3000.0]])
+    lag = preceding_max(cape, 3)
+    np.testing.assert_array_equal(lag[:3, 0], [np.nan] * 3)
+    # day 3 sees days 0-2, day 5 sees 2-4 and not its own 3000
+    np.testing.assert_array_equal(lag[3:, 0], [900.0, 900.0, 200.0])
+
+
+def test_convection_on_refuses_a_span_without_cape(config: Config) -> None:
+    on = config.model_copy(update={"meteo": config.meteo.model_copy(update={"convection": True})})
+    fields = era5_hourly(hourly(3 * 24))
+    with pytest.raises(ValueError, match="carries no CAPE"):
+        aggregate_daily(fields, on)

@@ -189,9 +189,12 @@ class HourlyFields:
     wind_dir: npt.NDArray[np.float64]
     soil_water_l1: npt.NDArray[np.float64]
     soil_water_l2: npt.NDArray[np.float64]
+    # J/kg, from ERA5; no served source carries it yet
+    cape: npt.NDArray[np.float64] | None = None
 
     def __post_init__(self) -> None:
-        shapes = {name: getattr(self, name).shape for name in HOURLY_FIELDS}
+        names = [*HOURLY_FIELDS, *(["cape"] if self.cape is not None else [])]
+        shapes = {name: getattr(self, name).shape for name in names}
         if len(set(shapes.values())) != 1:
             raise ValueError(f"Hourly fields disagree on shape: {shapes}")
         if self.times.shape[0] != self.temp_c.shape[0]:
@@ -244,6 +247,11 @@ def aggregate_daily(
     for layer in SOIL_LAYERS:
         columns[f"{layer}_mean"] = block(getattr(fields, layer)).mean(axis=1)
 
+    if config.meteo.convection:
+        if fields.cape is None:
+            raise ValueError("meteo.convection is on, but this hourly span carries no CAPE")
+        columns["cape_max"] = block(np.maximum(fields.cape, 0.0)).max(axis=1)
+
     for rung in config.meteo.lapse_rungs_k if config.meteo.cell_scale else ():
         shifted = fields.temp_c + rung
         ratio = block(unclipped_humidity(shifted, fields.dewpoint_c))
@@ -283,6 +291,7 @@ def era5_hourly(dataset: xr.Dataset) -> HourlyFields:
         wind_dir=direction[usable:],
         soil_water_l1=dataset["swvl1"].to_numpy()[usable:],
         soil_water_l2=dataset["swvl2"].to_numpy()[usable:],
+        cape=dataset["cape"].to_numpy()[usable:] if "cape" in dataset else None,
     )
 
 
@@ -307,6 +316,16 @@ def trailing_sum(values: npt.NDArray[np.float64], window: int) -> npt.NDArray[np
     total = np.full(values.shape, np.nan)
     total[window - 1 :] = padded[window:] - padded[:-window]
     return total
+
+
+def preceding_max(values: npt.NDArray[np.float64], window: int) -> npt.NDArray[np.float64]:
+    """Per day, the highest value over the `window` days before it, the day itself excluded."""
+    out = np.full(values.shape, np.nan)
+    n_days = values.shape[0]
+    if n_days > window:
+        shifted = [values[window - lag : n_days - lag] for lag in range(1, window + 1)]
+        out[window:] = np.max(shifted, axis=0)
+    return out
 
 
 def days_since_rain(
@@ -337,6 +356,9 @@ def add_lag_features(columns: dict[str, npt.NDArray[np.float64]], config: Config
         ("rh_mean", config.meteo.rh_window_days),
     ):
         columns[f"{source}_{window}d"] = trailing_sum(columns[source], window) / window
+
+    if config.meteo.convection:
+        columns["cape_lag"] = preceding_max(columns["cape_max"], config.meteo.cape_lag_days)
 
     if not config.meteo.cell_scale:
         return
@@ -533,6 +555,7 @@ def validate_meteo(meteo: pd.DataFrame, lattice: Lattice, config: Config) -> Non
         "precip_sum": (0.0, config.meteo.max_precip_mm),
         "vpd_max": (0.0, 100.0),
         "days_since_rain": (0.0, float(config.meteo.dry_spell_cap_days)),
+        "cape_max": (0.0, 15000.0),
         "wind_dir_mean": (0.0, 360.0),
         "wind_dir_at_max": (0.0, 360.0),
     }

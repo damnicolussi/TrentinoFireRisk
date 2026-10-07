@@ -289,6 +289,24 @@ categories:
       rh_mean_7d_lapse: {min: 0.0, max: 100.0}
       rh_range_lapse: {min: 0.0, max: 100.0}
 
+  # present only with meteo.convection on
+  meteo_convection:
+    source: "ERA5 convective available potential energy, resampled bilinearly from 0.25 degrees
+      onto the 0.1 degree backbone, daily maximum of the hourly values"
+    provider: "ERA5 (ECMWF) via Earth Engine"
+    period: "1984 to 2026, hourly to daily"
+    resolution: "0.25 degrees, on the 0.1 degree backbone"
+    license: "Copernicus, free and open"
+    url: "https://developers.google.com/earth-engine/datasets/catalog/ECMWF_ERA5_HOURLY"
+    temporal: dynamic
+    forecastable: true
+    dtype: float32
+    optional: true
+    columns:
+      cape_max: {min: 0.0, max: 15000.0}
+      # the highest daily maximum over the days before, meteo.cape_lag_days of them
+      cape_lag: {min: 0.0, max: 15000.0}
+
   fwi:
     source: "Canadian FWI on the ERA5-Land backbone, nearest cell"
     provider: "Canadian Forest Fire Weather Index"

@@ -50,6 +50,9 @@ REFERENCE_NAME: Final = "v2"
 # the expected ignitions along a road are summed over one holdout day in this many
 MASS_STRIDE_DAYS: Final = 7
 
+# the cadastre's cause code for lightning
+LIGHTNING_CAUSE: Final = 10
+
 # a variant passes when its holdout AUPRC is no more than this below v2's and its median
 # ignition percentile is not lower
 AUPRC_TOLERANCE: Final = 0.02
@@ -141,6 +144,20 @@ VARIANT_SETS: Final[dict[str, tuple[Variant, ...]]] = {
         ),
         Variant(
             "no_land_cover", "no land cover at all", columns=without_land_cover("l3", "l2", "l1")
+        ),
+    ),
+    # needs meteo.convection on, and the backbone and the table rebuilt with it
+    "convection": (
+        Variant(REFERENCE_NAME, "v2 refitted, no convection"),
+        Variant(
+            "cape_max",
+            "does the day's convective energy pick out the lightning days?",
+            columns=adding("cape_max"),
+        ),
+        Variant(
+            "cape_lag",
+            "and the days before, for strikes that smolder before they are reported?",
+            columns=adding("cape_max", "cape_lag"),
         ),
     ),
     "search": (
@@ -512,6 +529,7 @@ def event_axis(
         raise ValueError("No day scored")
     baseline = history_baseline(config, config.trentino.test_years_start - 1)
     events_scored = events[["cell_id", "date", "season"]]
+    lightning = events["cause"].eq(LIGHTNING_CAUSE).fillna(False).to_numpy(dtype=bool)
     baseline_frame = events_scored.assign(
         within_day_percentile=baseline.reindex(events_scored["cell_id"]).to_numpy()
     )
@@ -519,11 +537,15 @@ def event_axis(
 
     results: dict[str, Any] = {
         "days": {name: len(group) for name, group in days.items()},
-        "baseline": summarize_events(baseline_frame, aggregate_percentiles),
+        "baseline": {
+            **summarize_events(baseline_frame, aggregate_percentiles),
+            "lightning": aggregate_percentiles(baseline_frame[lightning]),
+        },
         "events": {
             "cell_id": events_scored["cell_id"].astype("int64").tolist(),
             "date": pd.DatetimeIndex(events_scored["date"]).strftime("%Y-%m-%d").tolist(),
             "season": events_scored["season"].astype(str).tolist(),
+            "lightning": lightning.tolist(),
         },
         "variants": {},
     }
@@ -532,7 +554,10 @@ def event_axis(
             pd.concat(tally.ranks), on=["cell_id", "date"], how="left", validate="m:1"
         )
         results["variants"][name] = {
-            "events": summarize_events(scored, aggregate_percentiles),
+            "events": {
+                **summarize_events(scored, aggregate_percentiles),
+                "lightning": aggregate_percentiles(scored[lightning]),
+            },
             "percentiles": scored["within_day_percentile"].astype("float64").tolist(),
             "cell_share": {group: share.share() for group, share in tally.shares.items()},
             "roads": {
@@ -640,6 +665,8 @@ def finish_gaps(results: dict[str, Any], config: Config) -> None:
     base = np.asarray(variants[REFERENCE_NAME]["percentiles"])
     subsets = {"overall": np.ones(len(seasons), dtype=bool)}
     subsets |= {str(season): seasons == season for season in sorted(set(seasons))}
+    if "lightning" in events:
+        subsets["lightning"] = np.asarray(events["lightning"], dtype=bool)
     for variant in variants.values():
         other = np.asarray(variant["percentiles"])
         variant["median_gap"] = {
@@ -723,6 +750,8 @@ def criteria(results: dict[str, Any]) -> dict[str, dict[str, Any]]:
         )
         summer = events["by_season"].get("summer", {}).get("median_percentile", float("nan"))
         base_summer = base_axis["events"]["by_season"].get("summer", {})
+        strikes = events.get("lightning", {}).get("median_percentile", float("nan"))
+        base_strikes = base_axis["events"].get("lightning", {})
         gaps = axis[name].get("median_gap", {})
         out[name] = {
             "auprc_delta": auprc,
@@ -732,6 +761,8 @@ def criteria(results: dict[str, Any]) -> dict[str, dict[str, Any]]:
             "median_gap": gaps.get("overall"),
             "summer_delta": summer - base_summer.get("median_percentile", float("nan")),
             "summer_gap": gaps.get("summer"),
+            "lightning_delta": strikes - base_strikes.get("median_percentile", float("nan")),
+            "lightning_gap": gaps.get("lightning"),
             "august_delta": axis[name]["cell_share"]["august"] - base_axis["cell_share"]["august"],
         }
     return out
@@ -842,8 +873,12 @@ def render(results: dict[str, Any]) -> str:
         "",
     ]
 
+    # older result files predate the lightning subset
+    strikes = "lightning" in axis["baseline"]
+
     def event_row(label: str, events: dict[str, Any]) -> list[str]:
         overall = events["overall"]
+        lightning = events.get("lightning", {})
         return [
             label,
             f"{overall['median_percentile']:.3f}",
@@ -854,10 +889,17 @@ def render(results: dict[str, Any]) -> str:
                 else "n/a"
                 for season in seasons
             ),
+            *([f"{lightning['median_percentile']:.3f} ({lightning['events']})"] if strikes else []),
         ]
 
     lines += table(
-        ["variant", "median", "≥ 90th", *(f"{season} median" for season in seasons)],
+        [
+            "variant",
+            "median",
+            "≥ 90th",
+            *(f"{season} median" for season in seasons),
+            *(["lightning median (ignitions)"] if strikes else []),
+        ],
         [event_row(f"`{name}`", axis["variants"][name]["events"]) for name in names]
         + [event_row("fire-history baseline", axis["baseline"])],
     )
@@ -919,13 +961,22 @@ def render(results: dict[str, Any]) -> str:
         "",
     ]
     lines += table(
-        ["variant", "AUPRC", "median", "summer median", "August cell share", "passes"],
+        [
+            "variant",
+            "AUPRC",
+            "median",
+            "summer median",
+            *(["lightning median"] if strikes else []),
+            "August cell share",
+            "passes",
+        ],
         [
             [
                 f"`{name}`",
                 f"{row['auprc_delta']:+.4f}",
                 _gap(row["median_delta"], row["median_gap"]),
                 _gap(row["summer_delta"], row["summer_gap"]),
+                *([_gap(row["lightning_delta"], row["lightning_gap"])] if strikes else []),
                 f"{100 * row['august_delta']:+.1f} pt",
                 "yes" if row["auprc_ok"] and row["median_ok"] else "no",
             ]

@@ -192,6 +192,17 @@ meteo:
   # +7.2 K, and at 2 K spacing the interpolation is off by well under one RH point.
   lapse_rungs_k: [-10, -8, -6, -4, -2, 0, 2, 4, 6, 8]
 
+  # adds cape_max and cape_lag, from ERA5 rather than ERA5-Land, which carries no convection.
+  # Off, the fetch, the backbone and the table are the ones v2 was trained on;
+  # `tfire variants convection` needs it on.
+  convection: false
+  convection_variables:
+    - "convective_available_potential_energy"
+
+  # cape_lag is the highest daily CAPE over this many days before the day itself: a lightning
+  # strike can smolder for days before the fire is reported
+  cape_lag_days: 3
+
   # plausibility bounds for the daily aggregates.
   min_temp_c: -45.0
   max_temp_c: 45.0

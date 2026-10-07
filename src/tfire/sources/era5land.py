@@ -41,6 +41,8 @@ SHORT_NAMES: Final[dict[str, str]] = {
     "volumetric_soil_water_layer_2": "swvl2",
     "snow_cover": "snowc",
     "snow_depth": "sde",
+    "convective_available_potential_energy": "cape",
+    "convective_precipitation": "cp",
 }
 
 RESOLUTION_DEG: Final = 0.1
@@ -59,6 +61,14 @@ GEE_BANDS: Final[dict[str, str]] = {
     "volumetric_soil_water_layer_2": "volumetric_soil_water_layer_2",
     "snow_cover": "snow_cover",
     "snow_depth": "snow_depth",
+}
+
+# ERA5 itself, at 0.25 degrees, for fields ERA5-Land does not carry. Earth Engine resamples it
+# bilinearly onto the 0.1 degree lattice, so it is cached and read like the backbone's own.
+ERA5_COLLECTION: Final = "ECMWF/ERA5/HOURLY"
+ERA5_BANDS: Final[dict[str, str]] = {
+    "convective_available_potential_energy": "convective_available_potential_energy",
+    "convective_precipitation": "convective_precipitation",
 }
 
 # `getDownloadURL` refuses more bands than this, and one window carries hours x variables
@@ -189,13 +199,19 @@ def half_hours(year: int, half: int) -> int:
     return 24 * sum(monthrange(year, month)[1] for month in half_months(half))
 
 
-def windows(config: Config, year: int, half: int) -> list[tuple[datetime, datetime]]:
-    """Half-open intervals tiling one half-year, each within the band cap."""
+def windows(
+    config: Config, year: int, half: int, n_variables: int | None = None
+) -> list[tuple[datetime, datetime]]:
+    """Half-open intervals tiling one half-year, each within the band cap.
+
+    `n_variables` is what one request carries, all of `fetched_variables` unless given.
+    """
     span = config.meteo.gee_window_hours
-    bands = span * len(config.meteo.variables)
+    n_variables = n_variables or len(config.meteo.fetched_variables)
+    bands = span * n_variables
     if bands > MAX_GEE_BANDS:
         raise ValueError(
-            f"{span} hours x {len(config.meteo.variables)} variables is {bands} bands, "
+            f"{span} hours x {n_variables} variables is {bands} bands, "
             f"over Earth Engine's limit of {MAX_GEE_BANDS}; lower meteo.gee_window_hours"
         )
 
@@ -216,17 +232,20 @@ def windows(config: Config, year: int, half: int) -> list[tuple[datetime, dateti
     reraise=True,
 )
 def _download_window(
-    config: Config, lattice: Lattice, start: datetime, end: datetime
+    config: Config, lattice: Lattice, start: datetime, end: datetime, variables: list[str]
 ) -> tuple[list[str], bytes]:
     import ee
 
-    bands = [GEE_BANDS[name] for name in config.meteo.variables]
+    source = collection_of(variables[0])
+    bands = [{**GEE_BANDS, **ERA5_BANDS}[name] for name in variables]
     collection = (
-        ee.ImageCollection(GEE_COLLECTION)
+        ee.ImageCollection(source)
         .filterDate(start.strftime("%Y-%m-%dT%H:%M:%S"), end.strftime("%Y-%m-%dT%H:%M:%S"))
         .select(bands)
     )
     stamps: list[str] = collection.aggregate_array("system:index").getInfo()
+    if source == ERA5_COLLECTION:
+        collection = collection.map(lambda image: image.resample("bilinear"))
 
     west = float(lattice.longitudes[0]) - RESOLUTION_DEG / 2
     north = float(lattice.latitudes[0]) + RESOLUTION_DEG / 2
@@ -304,7 +323,7 @@ def read_window(
 
     cropped: npt.NDArray[np.float32] = stack[:, rows[:, None], columns[None, :]]
     if np.any(cropped == _MASK_FILL):
-        raise ValueError("Earth Engine masked an ERA5-Land cell over Trentino")
+        raise ValueError("Earth Engine masked a backbone cell over Trentino")
     return cropped.reshape(n_hours, n_variables, lattice.n_rows, lattice.n_cols)
 
 
@@ -315,11 +334,12 @@ def _write_half(
     values: npt.NDArray[np.float32],
     year: int,
     half: int,
+    variables: list[str],
 ) -> list[Path]:
     import xarray as xr
 
     written = []
-    for index, variable in enumerate(config.meteo.variables):
+    for index, variable in enumerate(variables):
         short = SHORT_NAMES[variable]
         dataset = xr.Dataset(
             {short: (("valid_time", "latitude", "longitude"), values[:, index])},
@@ -338,18 +358,53 @@ def _write_half(
     return written
 
 
-def _fetch_half(config: Config, lattice: Lattice, year: int, half: int) -> list[Path]:
-    spans = windows(config, year, half)
+def collection_of(variable: str) -> str:
+    if variable in GEE_BANDS:
+        return GEE_COLLECTION
+    if variable in ERA5_BANDS:
+        return ERA5_COLLECTION
+    raise ValueError(f"No Earth Engine band known for {variable!r}")
+
+
+def _fetch_collection(
+    config: Config, lattice: Lattice, year: int, half: int, variables: list[str]
+) -> tuple[list[str], npt.NDArray[np.float32]]:
+    spans = windows(config, year, half, len(variables))
     with ThreadPoolExecutor(max_workers=config.meteo.gee_workers) as pool:
-        results = list(pool.map(lambda span: _download_window(config, lattice, *span), spans))
+        results = list(
+            pool.map(
+                lambda span: _download_window(config, lattice, span[0], span[1], variables), spans
+            )
+        )
 
     stamps: list[str] = []
     blocks = []
     for window_stamps, payload in results:
         stamps.extend(window_stamps)
-        blocks.append(
-            read_window(payload, lattice, len(window_stamps), len(config.meteo.variables))
-        )
+        blocks.append(read_window(payload, lattice, len(window_stamps), len(variables)))
+    return stamps, np.concatenate(blocks)
+
+
+def _fetch_half(
+    config: Config, lattice: Lattice, year: int, half: int, variables: list[str]
+) -> list[Path]:
+    groups: dict[str, list[str]] = {}
+    for variable in variables:
+        groups.setdefault(collection_of(variable), []).append(variable)
+
+    fetched = {
+        source: _fetch_collection(config, lattice, year, half, variables)
+        for source, variables in groups.items()
+    }
+    stamps = next(iter(fetched.values()))[0]
+    if any(other != stamps for other, _ in fetched.values()):
+        raise ValueError(f"{year} h{half}: the collections came back on different hours")
+    by_variable = {
+        variable: block[:, index]
+        for (_, block), variables in zip(fetched.values(), groups.values(), strict=True)
+        for index, variable in enumerate(variables)
+    }
+    values = np.stack([by_variable[name] for name in variables], axis=1)
 
     expected = half_hours(year, half)
     if len(stamps) != expected:
@@ -361,7 +416,7 @@ def _fetch_half(config: Config, lattice: Lattice, year: int, half: int) -> list[
     if np.any(np.diff(times) != np.timedelta64(1, "h")):
         raise ValueError(f"{year} h{half} is not a contiguous hourly series")
 
-    return _write_half(config, lattice, times, np.concatenate(blocks), year, half)
+    return _write_half(config, lattice, times, values, year, half, variables)
 
 
 def fetch_era5(
@@ -376,7 +431,7 @@ def fetch_era5(
     """
     import ee
 
-    unknown = sorted(set(config.meteo.variables) - set(GEE_BANDS))
+    unknown = sorted(set(config.meteo.fetched_variables) - set(GEE_BANDS) - set(ERA5_BANDS))
     if unknown:
         raise ValueError(f"No Earth Engine band known for {unknown}; extend GEE_BANDS")
 
@@ -388,9 +443,14 @@ def fetch_era5(
     targets = [
         cache_path(config, variable, year, half)
         for year, half in wanted
-        for variable in config.meteo.variables
+        for variable in config.meteo.fetched_variables
     ]
-    queue = [(year, half) for year, half in wanted if force or not has_half(config, year, half)]
+    # only what is missing: a variable added later does not refetch the ones already cached
+    queue = [
+        (year, half, missing)
+        for year, half in wanted
+        if (missing := missing_variables(config, year, half, force))
+    ]
     if not queue:
         logger.info("All %d chunk(s) already cached", len(targets))
         return targets
@@ -406,9 +466,9 @@ def fetch_era5(
         config.meteo.gee_workers,
     )
 
-    for index, (year, half) in enumerate(queue, start=1):
+    for index, (year, half, missing) in enumerate(queue, start=1):
         started = time.monotonic()
-        written = _fetch_half(config, lattice, year, half)
+        written = _fetch_half(config, lattice, year, half, missing)
         size = sum(path.stat().st_size for path in written)
         logger.info(
             "[%d/%d] %d h%d -> %d file(s) (%.1f MB, %.0fs)",
@@ -423,9 +483,19 @@ def fetch_era5(
     return targets
 
 
+def missing_variables(config: Config, year: int, half: int, force: bool = False) -> list[str]:
+    return [
+        name
+        for name in config.meteo.fetched_variables
+        if force or not cache_path(config, name, year, half).is_file()
+    ]
+
+
 def has_half(config: Config, year: int, half: int) -> bool:
     """Whether every variable is cached for one half-year."""
-    return all(cache_path(config, name, year, half).is_file() for name in config.meteo.variables)
+    return all(
+        cache_path(config, name, year, half).is_file() for name in config.meteo.fetched_variables
+    )
 
 
 def missing_years(config: Config, years: list[int]) -> list[int]:
@@ -445,7 +515,7 @@ def open_half(config: Config, year: int, half: int) -> xr.Dataset:
     """
     import xarray as xr
 
-    parts = [_read_chunk(config, name, year, half) for name in config.meteo.variables]
+    parts = [_read_chunk(config, name, year, half) for name in config.meteo.fetched_variables]
     return _stack_cells(xr.merge(parts, join="exact"))
 
 
@@ -494,7 +564,7 @@ def read_lattice(config: Config) -> Lattice:
     import xarray as xr
 
     for year, half in fetch_halves(config):
-        for variable in config.meteo.variables:
+        for variable in config.meteo.fetched_variables:
             path = cache_path(config, variable, year, half)
             if path.is_file():
                 with xr.open_dataset(path) as dataset:
